@@ -1,0 +1,10 @@
+{
+  "name": "flyai-hermes-travel-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Node runtime dependencies for Hermes FlyAI Travel.",
+  "dependencies": {
+    "@fly-ai/flyai-cli": "^1.0.14"
+  }
+}
+
