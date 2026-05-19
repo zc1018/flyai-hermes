@@ -52,6 +52,35 @@ button {
   margin-bottom: 22px;
 }
 
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-link,
+.quota-pill,
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+  padding: 0 12px;
+}
+
+.ghost-button {
+  height: 36px;
+  color: var(--ink);
+  background: #ffffff;
+}
+
 .eyebrow {
   margin: 0 0 4px;
   color: var(--amber);
@@ -213,6 +242,70 @@ button:disabled {
   margin-top: 16px;
 }
 
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.admin-form,
+.admin-list {
+  display: grid;
+  gap: 10px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.check-row.compact {
+  min-height: 34px;
+}
+
+.check-row input {
+  width: auto;
+  height: auto;
+}
+
+.user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.user-row strong,
+.user-row span {
+  display: block;
+}
+
+.user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  max-width: 620px;
+}
+
+.user-actions button,
+.user-actions input {
+  height: 34px;
+  padding: 0 12px;
+}
+
+.user-actions input[type="number"] {
+  width: 92px;
+}
+
 .history-item {
   width: 100%;
   height: auto;
@@ -255,6 +348,12 @@ textarea {
 
 .query-actions {
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.quota-pill.warn {
+  color: var(--amber);
+  border-color: rgba(180, 83, 9, 0.25);
 }
 
 #queryHint,
@@ -412,6 +511,16 @@ textarea {
   min-width: 96px;
 }
 
+.segment-label {
+  border: 1px solid rgba(19, 95, 74, 0.22);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--green);
+  background: rgba(19, 95, 74, 0.06);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .transport-no {
   max-width: 150px;
   text-align: center;
@@ -526,6 +635,12 @@ textarea {
   .history-panel {
     position: static;
     max-height: 280px;
+  }
+
+  .admin-grid,
+  .user-row {
+    grid-template-columns: 1fr;
+    display: grid;
   }
 
   .segment {

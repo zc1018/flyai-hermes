@@ -42,9 +42,13 @@ def build_prompt(user_query: str, flyai_bin: str = "flyai") -> str:
 2. 不要调用 skill_view，也不要读取 references 文档；你已经知道本次应直接执行：
    {flyai_bin} ai-search --query "<用户原始请求>"
 3. 执行 terminal 命令时 timeout 至少设置为 150 秒，并保留现有 PATH。
-4. 查询完成后，直接输出 flyai 返回的 JSON 或 Markdown 内容，不要再二次设计卡片，不要输出代码围栏，不要解释执行过程。
-5. 如果 flyai 返回 jumpUrl/detailUrl/picUrl/mainPic，保留这些链接和图片字段或 Markdown 链接。
-6. 如果没有查到结果，输出一个简短中文说明，并给出下一步可尝试的更具体条件。
+4. 查询完成后，优先输出一个纯 JSON 对象，不要输出代码围栏，不要解释执行过程。结构如下：
+   {{"summary":"一句话结论","blocks":[{{"type":"flight_card|train_card|hotel_card|poi_card|destination_card|guide_section|notice","title":"...","price":"...","number":"...","segments":[{{"label":"去程/返程","depCity":"...","depStation":"...","depTime":"...","arrCity":"...","arrStation":"...","arrTime":"...","carrier":"...","number":"...","price":"..."}}],"items":["..."]}}]}}
+5. 如果用户要往返机票，必须在同一个 flight_card 里同时给出去程和返程两个 segment；每个 segment 都要尽量保留航班号、航司、日期、起降时间、机场/城市、单段价格。若 flyai 没返回某个价格，写“未返回票价”，不要省略字段。
+6. 如果用户要酒店、火车或景点，也要保留酒店名称、列车班次号、价格、地址、评分、链接等 flyai 已返回的核心字段。
+7. 如果 flyai 返回 jumpUrl/detailUrl/picUrl/mainPic，保留这些链接和图片字段或 Markdown 链接。
+8. 如果无法稳定转换成上述 JSON，才直接输出 flyai 返回的 Markdown；但仍不要输出代码围栏。
+9. 如果没有查到结果，输出一个简短中文说明，并给出下一步可尝试的更具体条件。
 
 用户请求：
 {user_query}
@@ -95,7 +99,7 @@ class HermesClient:
             command.extend(["-m", self.settings.hermes_model])
         return command
 
-    def run_stream(self, user_query: str) -> Iterator[HermesStreamEvent]:
+    def run_stream(self, user_query: str, timeout_seconds: Optional[int] = None) -> Iterator[HermesStreamEvent]:
         if not Path(self.settings.hermes_bin).exists():
             yield HermesStreamEvent(
                 type="error",
@@ -108,6 +112,7 @@ class HermesClient:
         command = self.stream_command(prompt)
         env = runtime_env()
         env["PYTHONUNBUFFERED"] = "1"
+        effective_timeout = timeout_seconds or self.settings.hermes_timeout_seconds
         started = time.monotonic()
         output_queue: queue.Queue[Optional[str]] = queue.Queue()
 
@@ -146,7 +151,7 @@ class HermesClient:
             stream_done = False
             while not stream_done:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
-                if elapsed_ms > self.settings.hermes_timeout_seconds * 1000:
+                if elapsed_ms > effective_timeout * 1000:
                     process.kill()
                     try:
                         process.wait(timeout=5)
@@ -224,7 +229,7 @@ class HermesClient:
                 except subprocess.TimeoutExpired:
                     pass
 
-    def run(self, user_query: str) -> HermesResult:
+    def run(self, user_query: str, timeout_seconds: Optional[int] = None) -> HermesResult:
         if not Path(self.settings.hermes_bin).exists():
             return HermesResult(
                 stdout="",
@@ -234,6 +239,7 @@ class HermesClient:
             )
 
         prompt = build_prompt(user_query, flyai_bin=_flyai_bin())
+        effective_timeout = timeout_seconds or self.settings.hermes_timeout_seconds
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -242,7 +248,7 @@ class HermesClient:
                 capture_output=True,
                 text=True,
                 env=runtime_env(),
-                timeout=self.settings.hermes_timeout_seconds,
+                timeout=effective_timeout,
             )
             duration_ms = int((time.monotonic() - started) * 1000)
             result = HermesResult(

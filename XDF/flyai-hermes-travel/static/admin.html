@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>访问后台 · Hermes FlyAI Travel</title>
+    <link rel="stylesheet" href="assets/styles.css?v=20260519-6" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Admin</p>
+          <h1>访问后台</h1>
+        </div>
+        <div class="top-actions">
+          <a class="admin-link" href="./">返回查询</a>
+          <button class="ghost-button" id="adminLogoutButton" type="button">退出</button>
+          <div class="status-pill ok" id="adminStatus">加载中</div>
+        </div>
+      </section>
+
+      <section class="card is-hidden" id="accessNotice">
+        <div class="card-body">
+          <div class="card-title">
+            <h3>需要管理员口令</h3>
+          </div>
+          <p class="small" id="accessNoticeText">当前账户没有后台权限。退出后可以换管理员口令登录。</p>
+        </div>
+      </section>
+
+      <section class="admin-grid admin-only">
+        <article class="card">
+          <div class="card-body">
+            <div class="card-title">
+              <h3>创建朋友口令</h3>
+            </div>
+            <form id="createUserForm" class="admin-form">
+              <input name="label" placeholder="备注名，例如：老王" required />
+              <input name="password" placeholder="访问口令，至少 6 位" required minlength="6" />
+              <input name="daily_limit" type="number" min="0" max="1000" value="10" />
+              <input name="timeout_seconds" type="number" min="30" max="900" value="300" />
+              <label class="check-row"><input name="can_view_history" type="checkbox" checked /> 允许查看自己的历史</label>
+              <button type="submit">创建</button>
+            </form>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="card-body">
+            <div class="card-title">
+              <h3>运行状态</h3>
+            </div>
+            <div class="meta-grid" id="runtimeStats"></div>
+          </div>
+        </article>
+      </section>
+
+      <section class="card admin-only">
+        <div class="card-body">
+          <div class="card-title">
+            <h3>用户与额度</h3>
+          </div>
+          <div class="admin-list" id="userList"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="assets/admin.js?v=20260519-6"></script>
+  </body>
+</html>

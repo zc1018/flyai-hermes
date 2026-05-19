@@ -25,6 +25,60 @@ def test_normalizes_explicit_blocks():
     assert blocks[1]["bookingUrl"] == "https://example.com/book"
 
 
+def test_normalizes_common_json_card_aliases_from_hermes():
+    raw = """
+{
+  "summary": "26年端午节北京东京最低往返组合",
+  "blocks": [
+    {
+      "type": "flightcard",
+      "title": "北京↔东京 端午节往返最低直飞组合",
+      "price": "3031",
+      "number": "IJ018 / HU440",
+      "segments": [
+        {
+          "label": "去程",
+          "depCity": "北京",
+          "depStation": "首都国际机场",
+          "depTime": "2026-05-30 10:45",
+          "arrCity": "东京",
+          "arrStation": "成田机场",
+          "arrTime": "15:30",
+          "carrier": "春秋日本航空",
+          "number": "IJ018",
+          "price": "1113元"
+        },
+        {
+          "label": "返程",
+          "depCity": "东京",
+          "depStation": "成田机场",
+          "depTime": "2026-06-04 13:55",
+          "arrCity": "北京",
+          "arrStation": "首都国际机场",
+          "arrTime": "17:05",
+          "carrier": "海南航空",
+          "number": "HU440",
+          "price": "1918元"
+        }
+      ]
+    }
+  ]
+}
+"""
+
+    blocks = normalize_output(raw, "北京东京往返机票")
+
+    assert blocks[0]["type"] == "notice"
+    assert blocks[1]["type"] == "flight_card"
+    assert blocks[1]["price"] == "¥3,031"
+    assert blocks[1]["number"] == "IJ018 / HU440"
+    assert len(blocks[1]["segments"]) == 2
+    assert blocks[1]["segments"][0]["label"] == "去程"
+    assert blocks[1]["segments"][0]["price"] == "¥1113"
+    assert blocks[1]["segments"][1]["label"] == "返程"
+    assert blocks[1]["segments"][1]["price"] == "¥1918"
+
+
 def test_converts_hotel_item_list():
     raw = """
     {
@@ -464,6 +518,308 @@ def test_extracts_wrapped_markdown_table_flight_combos():
     assert blocks[1]["title"] == "组合二：北京 ↔ 东京"
     assert blocks[1]["subtitle"] == "次低，端午节当天出发"
     assert len(blocks) == 2
+
+
+def test_extracts_unlabeled_round_trip_flight_table():
+    raw = """
+ ─  ⚕ Hermes  ─────────────────────────────────────────────────────────────────
+
+     基于 fly.ai 实时搜索结果，以下是 2026 年端午节前后北京-东京往返、停留
+     5 晚、不转机的最低票价组合方案。
+     推荐最低票价往返组合
+     | 航段 | 日期 | 航班号 | 出发 | 到达 | 时长 | 价格 |
+     |------|------|--------|------|------|------|------|
+     | 去程 | 5 月 28 日（周四） | 春秋日本 IJ018 | 北京首都 10:45 | 东京成田 15:30 | 3h45m | ¥1,014 |
+     | 返程 | 6 月 2 日（周二） | 海南航空 HU440 | 东京成田 13:55 | 北京首都 17:20 | 4h25m | ¥1,220 |
+"""
+
+    blocks = normalize_output(raw)
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["title"] == "推荐最低票价往返组合：北京 ↔ 东京"
+    assert blocks[0]["price"] == "¥2,234"
+    assert blocks[0]["number"] == "IJ018 / HU440"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["depCity"] == "北京"
+    assert blocks[0]["segments"][0]["depStation"] == "首都"
+    assert blocks[0]["segments"][0]["arrCity"] == "东京"
+    assert blocks[0]["segments"][0]["arrStation"] == "成田"
+    assert blocks[0]["segments"][0]["duration"] == "3小时45分钟"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["depCity"] == "东京"
+    assert blocks[0]["segments"][1]["arrCity"] == "北京"
+    assert blocks[0]["segments"][1]["number"] == "HU440"
+
+
+def test_extracts_round_trip_table_with_flight_time_airport_price_columns():
+    raw = """
+基于 fly.ai 实时结果，2026 年端午节（6 月 20 日）前后北京↔东京往返直飞。
+推荐最低总价方案
+| 航段 | 日期 | 航班 | 起降时间 | 机场 | 票价 |
+|---|---|---|---|---|---|
+| 去程 | 6 月 19 日（周五） | IJ018 春秋日本航空 | 10:45 → 15:30 |
+首都 T3 → 成田 T3 | ¥1,474 |
+| 回程 | 6 月 25 日（周四） | IJ017 春秋日本航空 | 17:55 → 21:15 |
+成田 T3 → 首都 T3 | ¥1,354 |
+| 往返合计 | 停留 6 晚 | | | | ¥2,828 |
+
+其他可选组合
+方案 A：6 月 20 日去 + 6 月 25 日回
+- 去程：CZ647 南航 09:40 大兴 → 14:00 羽田  ¥1,748
+- 回程：IJ017 春秋 17:55 成田 → 21:15 首都  ¥1,354
+- 合计：¥3,102
+"""
+
+    blocks = normalize_output(raw)
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["title"] == "推荐最低总价方案：北京 ↔ 东京"
+    assert blocks[0]["price"] == "¥2,828"
+    assert blocks[0]["number"] == "IJ018 / IJ017"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["number"] == "IJ018"
+    assert blocks[0]["segments"][0]["depCity"] == "北京"
+    assert blocks[0]["segments"][0]["depStation"] == "首都 T3"
+    assert blocks[0]["segments"][0]["depTime"] == "6月19日（周五） 10:45"
+    assert blocks[0]["segments"][0]["arrCity"] == "东京"
+    assert blocks[0]["segments"][0]["arrStation"] == "成田 T3"
+    assert blocks[0]["segments"][0]["price"] == "¥1,474"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["number"] == "IJ017"
+    assert blocks[0]["segments"][1]["depCity"] == "东京"
+    assert blocks[0]["segments"][1]["arrCity"] == "北京"
+    assert blocks[0]["segments"][1]["price"] == "¥1,354"
+
+
+def test_query_aware_repair_combines_loose_round_trip_lines():
+    raw = """
+基于 fly.ai 实时结果，推荐组合如下：
+推荐组合
+- 去程：6月19日 IJ018 春秋日本航空 10:45-15:30 ¥1,474
+- 回程：6月25日 IJ017 春秋日本航空 17:55-21:15 ¥1,354
+"""
+
+    blocks = normalize_output(raw, "北京东京往返机票，停留 5 晚")
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["title"] == "往返航班：北京 ↔ 东京"
+    assert blocks[0]["price"] == "¥2,828"
+    assert blocks[0]["number"] == "IJ018 / IJ017"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["depStation"] == "北京"
+    assert blocks[0]["segments"][0]["arrStation"] == "东京"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["depStation"] == "东京"
+    assert blocks[0]["segments"][1]["arrStation"] == "北京"
+
+
+def test_query_aware_repair_uses_embedded_raw_text_for_json_blocks():
+    raw = """
+{
+  "summary": "最低价方案",
+  "rawText": "推荐组合\\n- 去程：6月19日 IJ018 春秋日本航空 10:45-15:30 ¥1,474\\n- 回程：6月25日 IJ017 春秋日本航空 17:55-21:15 ¥1,354",
+  "blocks": [
+    {
+      "type": "flight_card",
+      "title": "只含去程的错误卡片",
+      "price": "¥1,474",
+      "number": "IJ018",
+      "segments": [
+        {"label": "去程", "depStation": "北京", "depTime": "10:45", "arrStation": "东京", "arrTime": "15:30", "number": "IJ018", "price": "¥1,474"}
+      ]
+    }
+  ]
+}
+"""
+
+    blocks = normalize_output(raw, "北京东京往返机票")
+
+    assert blocks[0]["title"] == "查询结论"
+    assert blocks[1]["type"] == "flight_card"
+    assert blocks[1]["title"] == "往返航班：北京 ↔ 东京"
+    assert blocks[1]["price"] == "¥2,828"
+    assert blocks[1]["number"] == "IJ018 / IJ017"
+    assert len(blocks[1]["segments"]) == 2
+
+
+def test_query_aware_warning_when_round_trip_card_cannot_be_completed():
+    raw = "北京到东京 CA181 08:05 → 12:25，价格 ¥1,474。"
+
+    blocks = normalize_output(raw, "北京东京往返机票")
+
+    assert blocks[0]["type"] == "notice"
+    assert blocks[0]["title"] == "结果可能不完整"
+    assert "往返机票" in blocks[0]["items"][0]
+
+
+def test_extracts_round_trip_from_prose_flight_sections():
+    raw = """
+2026年端午节 北京↔东京往返机票推荐
+
+根据飞猪数据，2026年端午节为6月19日（周五），以下方案可满足您的需求：
+
+推荐行程方案
+去程：6月19日（周五）上午北京出发 → 回程：6月24日（周三）下午/晚上东京返回
+（停留5晚，包含端午节假期）
+
+去程航班（北京→东京，上午出发，直飞）
+
+CA181
+- 航空公司：中国国航
+- 时间：08:05（北京首都）→ 12:25（东京羽田）
+- 飞行时长：约3小时20分
+- 特点：到达羽田机场，距东京市区更近
+
+CA925
+- 航空公司：中国国航
+- 时间：09:15（北京首都）→ 13:40（东京成田）
+- 飞行时长：约3小时25分
+
+回程航班（东京→北京，下午/晚上出发，直飞）
+
+CA182
+- 航空公司：中国国航
+- 时间：14:00（东京羽田）→ 16:45（北京首都）
+- 飞行时长：约3小时45分
+
+CA926
+- 航空公司：中国国航
+- 时间：15:15（东京成田）→ 18:05（北京首都）
+- 飞行时长：约3小时50分
+
+💡 最低票价建议
+目前系统中暂未提供具体日期的实时票价信息，建议您在飞猪平台搜索具体日期查看最低票价。
+
+推荐组合（性价比优先）：
+- 去程：CA181（08:05→12:25，羽田到达，距市区近）
+- 回程：CA926（15:15→18:05，下午出发，时间充裕）
+- 国航往返通常价格更具竞争力
+> ⚠️ 以上航班时刻为参考时刻，实际请以飞猪平台实时查询为准。
+"""
+
+    blocks = normalize_output(raw)
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["title"] == "2026年端午节 北京↔东京往返机票推荐"
+    assert blocks[0]["price"] == "未返回票价"
+    assert blocks[0]["number"] == "CA181 / CA926"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["number"] == "CA181"
+    assert blocks[0]["segments"][0]["depCity"] == "北京"
+    assert blocks[0]["segments"][0]["depStation"] == "首都"
+    assert blocks[0]["segments"][0]["depTime"] == "6月19日（周五） 08:05"
+    assert blocks[0]["segments"][0]["arrCity"] == "东京"
+    assert blocks[0]["segments"][0]["arrStation"] == "羽田"
+    assert blocks[0]["segments"][0]["carrier"] == "中国国航"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["number"] == "CA926"
+    assert blocks[0]["segments"][1]["depCity"] == "东京"
+    assert blocks[0]["segments"][1]["depStation"] == "成田"
+    assert blocks[0]["segments"][1]["arrCity"] == "北京"
+    assert blocks[0]["segments"][1]["arrStation"] == "首都"
+    assert blocks[0]["segments"][1]["depTime"] == "6月24日（周三） 15:15"
+    assert blocks[0]["items"][0] == "本次 fly.ai 未返回实时票价，无法确认最低价。"
+
+
+def test_extracts_round_trip_from_loose_outbound_inbound_sections():
+    raw = """
+以下是基于飞猪搜索结果整理的北京↔成都往返机票信息：
+
+✈️ 去程：北京 → 成都
+
+以下为部分代表性航班：
+
+CZ9144
+- 航空公司：南方航空 | 机型：32Z
+- 时间：06:55→09:55（约3小时）
+- 出发/到达：首都国际机场 → 双流国际机场
+
+HO5911
+- 航空公司：吉祥航空 | 机型：32Z
+- 时间：07:45→10:25（约2小时40分，最快之一）
+- 出发/到达：首都国际机场 → 双流国际机场
+
+✈️ 返程：成都 → 北京
+
+EU7483
+- 航空公司：成都航空 | 机型：332
+- 时间：09:30→12:15（约2小时45分）
+- 出发/到达：双流国际机场 → 首都国际机场
+
+HU7348
+- 航空公司：海南航空 | 机型：738
+- 时间：18:00→21:00（约3小时）
+- 出发/到达：天府机场 → 首都国际机场
+
+具体价格请以飞猪平台实时查询为准
+"""
+
+    blocks = normalize_output(raw, "北京到成都的往返机票")
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["price"] == "未返回票价"
+    assert blocks[0]["number"] == "CZ9144 / EU7483"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["depCity"] == "北京"
+    assert blocks[0]["segments"][0]["arrCity"] == "成都"
+    assert blocks[0]["segments"][0]["depStation"] == "首都国际机场"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["depCity"] == "成都"
+    assert blocks[0]["segments"][1]["arrCity"] == "北京"
+    assert blocks[0]["segments"][1]["depStation"] == "双流国际机场"
+
+
+def test_extracts_round_trip_from_directional_schedule_tables():
+    raw = """
+2026 年端午节北京↔东京往返航班信息
+
+2026 年端午节假期为 6 月 20 日（周六）— 6 月 22 日（周一）。
+一、北京 → 东京（上午出发，直飞）
+
+| 航班号 | 航司 | 路线 | 时间 | 时长 |
+|--------|------|------|------|------|
+| CA181 | 中国国航 | 首都→羽田 | 08:05→12:25 | 3h20m |
+| NH964 | 全日空 | 首都→羽田 | 08:20→12:55 | 3h35m |
+| IJ018 | 春秋日本 | 首都→成田 | 10:45→15:30 | 3h45m |
+
+推荐早班：CA181、NH964、JL020（08:00 左右出发）
+二、东京 → 北京（下午或晚上出发，直飞）
+
+| 航班号 | 航司 | 路线 | 时间 | 时长 |
+|--------|------|------|------|------|
+| HU440 | 海南航空 | 成田→首都 | 13:55→17:05 | 4h10m |
+| CA182 | 中国国航 | 羽田→首都 | 14:00→16:45 | 3h45m |
+| CA926 | 中国国航 | 成田→首都 | 15:15→18:05 | 3h50m |
+
+四、最低票价说明
+目前 fly.ai 体验模式暂未返回 6 月具体日期的实时票价数据。
+2. 重点关注 春秋日本航空 IJ018/IJ017（廉价航空，通常价格最低）
+3. 国航 CA181/CA182、南航 CZ647/CZ648 也是性价比常选
+"""
+
+    blocks = normalize_output(raw)
+
+    assert blocks[0]["type"] == "flight_card"
+    assert blocks[0]["title"] == "2026 年端午节北京↔东京往返航班信息"
+    assert blocks[0]["price"] == "未返回票价"
+    assert blocks[0]["number"] == "CA181 / CA182"
+    assert len(blocks[0]["segments"]) == 2
+    assert blocks[0]["segments"][0]["label"] == "去程"
+    assert blocks[0]["segments"][0]["number"] == "CA181"
+    assert blocks[0]["segments"][0]["depCity"] == "北京"
+    assert blocks[0]["segments"][0]["depStation"] == "首都"
+    assert blocks[0]["segments"][0]["arrCity"] == "东京"
+    assert blocks[0]["segments"][0]["arrStation"] == "羽田"
+    assert blocks[0]["segments"][0]["duration"] == "3小时20分钟"
+    assert blocks[0]["segments"][1]["label"] == "返程"
+    assert blocks[0]["segments"][1]["number"] == "CA182"
+    assert blocks[0]["segments"][1]["depCity"] == "东京"
+    assert blocks[0]["segments"][1]["arrCity"] == "北京"
 
 
 def test_parses_last_json_from_stream_output():

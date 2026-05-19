@@ -6,7 +6,7 @@ APP_NAME="flyai-hermes-travel"
 APP_DIR="/home/ec2-user/${APP_NAME}"
 PORT="${PORT:-8787}"
 PUBLIC_PATH="${PUBLIC_PATH:-/flyai-travel/}"
-APP_PASSWORD="${APP_PASSWORD:-change-me}"
+OWNER_PASSWORD="${OWNER_PASSWORD:-${APP_PASSWORD:-change-me}}"
 SESSION_SECRET="${SESSION_SECRET:-$(python3 - <<'PY'
 import secrets
 print(secrets.token_urlsafe(32))
@@ -14,7 +14,7 @@ PY
 )}"
 
 if [[ -z "${ARCHIVE_URL}" ]]; then
-  echo "Usage: APP_PASSWORD=... $0 https://tmpfiles.org/dl/.../flyai-hermes-travel.zip"
+  echo "Usage: OWNER_PASSWORD=... $0 https://tmpfiles.org/dl/.../flyai-hermes-travel.zip"
   exit 2
 fi
 
@@ -47,8 +47,9 @@ npm install --omit=dev
 mkdir -p data
 
 cat > .env <<EOF
-APP_PASSWORD=${APP_PASSWORD}
+OWNER_PASSWORD=${OWNER_PASSWORD}
 SESSION_SECRET=${SESSION_SECRET}
+SECURE_COOKIES=${SECURE_COOKIES:-false}
 HERMES_BIN=/home/ec2-user/.local/bin/hermes
 HERMES_HOME=/home/ec2-user/.hermes
 HERMES_SKILL=flyai

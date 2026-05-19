@@ -10,8 +10,12 @@ const resultMeta = document.querySelector("#resultMeta");
 const historyList = document.querySelector("#historyList");
 const refreshHistory = document.querySelector("#refreshHistory");
 const healthStatus = document.querySelector("#healthStatus");
+const quotaStatus = document.querySelector("#quotaStatus");
+const adminLink = document.querySelector("#adminLink");
+const logoutButton = document.querySelector("#logoutButton");
 let activeStreamLog = null;
 let activeStreamText = "";
+let currentUser = null;
 
 async function request(path, options = {}) {
   const response = await fetch(path.replace(/^\//, ""), {
@@ -20,8 +24,7 @@ async function request(path, options = {}) {
     ...options,
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || response.statusText);
+    throw new Error(await responseErrorText(response));
   }
   return response.json();
 }
@@ -29,12 +32,17 @@ async function request(path, options = {}) {
 function setAuthenticated(value) {
   loginPanel.classList.toggle("is-hidden", value);
   workspace.classList.toggle("is-hidden", !value);
+  logoutButton.classList.toggle("is-hidden", !value);
+  if (!value) {
+    adminLink.classList.add("is-hidden");
+    quotaStatus.textContent = "";
+  }
 }
 
 async function boot() {
   await loadHealth();
   try {
-    await request("/api/me");
+    await loadMe();
     setAuthenticated(true);
     await loadHistory();
   } catch {
@@ -50,10 +58,7 @@ async function loadHealth() {
     healthStatus.classList.toggle("warn", !health.ok);
     if (!health.ok) {
       healthStatus.title = [
-        health.hermes_bin?.ok ? "" : "Hermes 不可用",
-        health.flyai_cli?.ok ? "" : "flyai CLI 不可用",
-        health.database?.ok ? "" : "SQLite 不可用",
-        health.app_password_configured ? "" : "APP_PASSWORD 未配置",
+        health.message || "服务暂时不可用",
       ]
         .filter(Boolean)
         .join("；");
@@ -72,12 +77,13 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password: passwordInput.value }),
     });
     passwordInput.value = "";
+    await loadMe();
     setAuthenticated(true);
     await loadHistory();
-  } catch {
+  } catch (error) {
     passwordInput.focus();
     passwordInput.value = "";
-    passwordInput.placeholder = "口令不正确";
+    passwordInput.placeholder = error.message || "口令不正确";
   }
 });
 
@@ -94,13 +100,14 @@ queryForm.addEventListener("submit", async (event) => {
 
   try {
     await streamQuery(query);
+    await loadMe();
   } catch (error) {
     renderBlocks([
       {
         type: "notice",
         severity: "error",
         title: "请求失败",
-        items: ["服务端没有返回可用结果。", error.message],
+        items: [error.message || "服务端没有返回可用结果。"],
       },
     ]);
   } finally {
@@ -110,6 +117,20 @@ queryForm.addEventListener("submit", async (event) => {
 });
 
 refreshHistory.addEventListener("click", loadHistory);
+logoutButton.addEventListener("click", logout);
+
+async function logout() {
+  await request("/api/logout", { method: "POST" }).catch(() => {});
+  currentUser = null;
+  activeStreamLog = null;
+  activeStreamText = "";
+  queryInput.value = "";
+  historyList.innerHTML = "";
+  results.innerHTML = "";
+  resultMeta.classList.remove("is-visible");
+  setAuthenticated(false);
+  passwordInput.focus();
+}
 
 async function loadHistory() {
   const items = await request("/api/history");
@@ -132,6 +153,22 @@ async function loadHistory() {
     });
     historyList.appendChild(button);
   }
+}
+
+async function loadMe() {
+  currentUser = await request("/api/me");
+  renderUserState();
+  return currentUser;
+}
+
+function renderUserState() {
+  if (!currentUser) return;
+  const quota = currentUser.quota || {};
+  const userLabel = currentUser.label || "用户";
+  const quotaText = quota.unlimited ? "不限次数" : `今日剩余 ${quota.remaining_today}/${quota.daily_limit}`;
+  quotaStatus.textContent = `${userLabel} · ${quotaText}`;
+  quotaStatus.classList.toggle("warn", !quota.unlimited && quota.remaining_today <= 1);
+  adminLink.classList.toggle("is-hidden", currentUser.role !== "owner");
 }
 
 function renderResult(data) {
@@ -204,7 +241,13 @@ function handleStreamMessage(message) {
   if (message.event === "progress") {
     const payload = message.data || {};
     const seconds = Math.max(0, Math.round((payload.elapsed_ms || 0) / 1000));
-    resultMeta.textContent = payload.kind === "heartbeat" ? `Hermes 仍在运行 · ${seconds}s` : `Hermes 实时执行中 · ${seconds}s`;
+    if (payload.kind === "queued") {
+      resultMeta.textContent = "正在排队，等待查询资源...";
+    } else if (payload.kind === "heartbeat") {
+      resultMeta.textContent = `Hermes 仍在运行 · ${seconds}s`;
+    } else {
+      resultMeta.textContent = `Hermes 实时执行中 · ${seconds}s`;
+    }
     if (payload.kind !== "heartbeat") appendStreamLog(payload.message || "");
     return false;
   }
@@ -232,6 +275,17 @@ function renderStreamShell() {
   `;
   activeStreamLog = card.querySelector(".stream-log");
   results.appendChild(card);
+}
+
+async function responseErrorText(response) {
+  const text = await response.text();
+  try {
+    const data = JSON.parse(text);
+    if (data.detail) return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+  } catch {
+    // Use the raw text below.
+  }
+  return text || response.statusText || "请求失败";
 }
 
 function appendStreamLog(text) {
@@ -335,6 +389,7 @@ function transportCard(block) {
           <span>${escapeHtml(segment.depTime || "")}</span>
         </div>
         <div class="route-meta">
+          ${segment.label ? `<span class="segment-label">${escapeHtml(segment.label)}</span>` : ""}
           <div class="route-line"></div>
           <span class="small">${escapeHtml(segment.duration || "")}</span>
           ${transportNo ? `<span class="small transport-no">${escapeHtml(transportNo)}</span>` : ""}

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hermes FlyAI Travel</title>
-    <link rel="stylesheet" href="assets/styles.css?v=20260519-3" />
+    <link rel="stylesheet" href="assets/styles.css?v=20260519-6" />
   </head>
   <body>
     <main class="shell">
@@ -13,13 +13,17 @@
           <p class="eyebrow">Hermes / FlyAI</p>
           <h1>旅行查询工作台</h1>
         </div>
-        <div class="status-pill" id="healthStatus">检查环境中</div>
+        <div class="top-actions">
+          <a class="admin-link is-hidden" id="adminLink" href="admin">后台</a>
+          <button class="ghost-button is-hidden" id="logoutButton" type="button">退出</button>
+          <div class="status-pill" id="healthStatus">检查环境中</div>
+        </div>
       </section>
 
       <section class="login-panel" id="loginPanel">
         <div>
           <h2>内部访问</h2>
-          <p>输入服务端配置的访问口令后开始查询。</p>
+          <p>输入你的访问口令后开始查询。请不要输入身份证、护照号、手机号、订单号等隐私信息。</p>
         </div>
         <form id="loginForm" class="login-form">
           <input id="passwordInput" type="password" autocomplete="current-password" placeholder="访问口令" />
@@ -44,6 +48,7 @@
             ></textarea>
             <div class="query-actions">
               <span id="queryHint">Hermes 会加载 flyai skill 查询实时旅行信息</span>
+              <span class="quota-pill" id="quotaStatus"></span>
               <button type="submit" id="queryButton">查询</button>
             </div>
           </form>
@@ -54,6 +59,6 @@
       </section>
     </main>
 
-    <script src="assets/app.js?v=20260519-3"></script>
+    <script src="assets/app.js?v=20260519-6"></script>
   </body>
 </html>

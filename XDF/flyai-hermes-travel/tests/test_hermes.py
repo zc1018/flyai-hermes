@@ -1,7 +1,7 @@
 from pathlib import Path
 import subprocess
 
-from app.config import Settings
+from app.config import Settings, load_settings
 from app.hermes import HermesClient, build_prompt
 
 
@@ -10,6 +10,16 @@ def test_prompt_uses_flyai_absolute_command():
 
     assert "/opt/bin/flyai ai-search" in prompt
     assert "不要调用 skill_view" in prompt
+    assert "flight_card" in prompt
+    assert "同一个 flight_card 里同时给出去程和返程" in prompt
+
+
+def test_load_settings_parses_integer_env(monkeypatch):
+    monkeypatch.setenv("HERMES_TIMEOUT_SECONDS", "900")
+
+    settings = load_settings()
+
+    assert settings.hermes_timeout_seconds == 900
 
 
 def test_empty_hermes_stdout_does_not_fallback(monkeypatch, tmp_path):
@@ -18,6 +28,7 @@ def test_empty_hermes_stdout_does_not_fallback(monkeypatch, tmp_path):
 
     settings = Settings(
         app_password="pw",
+        owner_password="pw",
         session_secret="secret",
         hermes_bin=str(hermes_bin),
         hermes_home=str(tmp_path / ".hermes"),
@@ -25,6 +36,7 @@ def test_empty_hermes_stdout_does_not_fallback(monkeypatch, tmp_path):
         hermes_provider="kimi-coding",
         hermes_model="kimi-k2.6",
         hermes_timeout_seconds=30,
+        secure_cookies=False,
         database_path=Path("data/travel.db"),
     )
 
@@ -43,6 +55,7 @@ def test_empty_hermes_stdout_does_not_fallback(monkeypatch, tmp_path):
 def test_hermes_command_forces_kimi_provider(tmp_path):
     settings = Settings(
         app_password="pw",
+        owner_password="pw",
         session_secret="secret",
         hermes_bin="/usr/local/bin/hermes",
         hermes_home=str(tmp_path / ".hermes"),
@@ -50,6 +63,7 @@ def test_hermes_command_forces_kimi_provider(tmp_path):
         hermes_provider="kimi-coding",
         hermes_model="kimi-k2.6",
         hermes_timeout_seconds=30,
+        secure_cookies=False,
         database_path=Path("data/travel.db"),
     )
 

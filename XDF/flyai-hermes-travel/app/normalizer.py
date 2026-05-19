@@ -18,6 +18,31 @@ ALLOWED_TYPES = {
     "booking_link",
 }
 
+TYPE_ALIASES = {
+    "flightcard": "flight_card",
+    "flight-card": "flight_card",
+    "flight": "flight_card",
+    "aircard": "flight_card",
+    "airlinecard": "flight_card",
+    "ticketcard": "flight_card",
+    "hotelcard": "hotel_card",
+    "hotel": "hotel_card",
+    "poicard": "poi_card",
+    "poi": "poi_card",
+    "destinationcard": "destination_card",
+    "destination": "destination_card",
+    "traincard": "train_card",
+    "train": "train_card",
+    "guidesection": "guide_section",
+    "guide-section": "guide_section",
+    "guide": "guide_section",
+    "comparisontable": "comparison_table",
+    "comparison-table": "comparison_table",
+    "table": "comparison_table",
+    "bookinglink": "booking_link",
+    "booking-link": "booking_link",
+}
+
 ROUTE_CITIES = [
     "北京",
     "上海",
@@ -41,26 +66,34 @@ ROUTE_CITIES = [
 ]
 
 
-def normalize_output(raw_output: str) -> List[Dict[str, Any]]:
+def normalize_output(raw_output: str, user_query: str = "") -> List[Dict[str, Any]]:
     parsed = _parse_json(raw_output)
     display_text = _display_text(raw_output)
     if parsed is None and display_text != raw_output:
         parsed = _parse_json(display_text)
     if parsed is None:
         display_text = _loose_json_data(display_text) or display_text
-        return _blocks_from_markdown(display_text, title="查询结果")
+        return _postprocess_blocks(
+            _blocks_from_markdown(display_text, title="查询结果"),
+            display_text,
+            user_query,
+        )
 
     if isinstance(parsed, dict) and isinstance(parsed.get("blocks"), list):
         blocks = [_normalize_block(block) for block in parsed["blocks"] if isinstance(block, dict)]
         summary = parsed.get("summary")
         if summary:
             blocks.insert(0, {"type": "notice", "title": "查询结论", "items": [str(summary)]})
-        return blocks or [_empty_notice()]
+        return _postprocess_blocks(blocks or [_empty_notice()], _source_text_from_parsed(parsed, display_text), user_query)
 
     if isinstance(parsed, dict) and isinstance(parsed.get("data"), dict):
         item_list = parsed["data"].get("itemList")
         if isinstance(item_list, list):
-            return _blocks_from_item_list(item_list)
+            return _postprocess_blocks(
+                _blocks_from_item_list(item_list),
+                _source_text_from_parsed(parsed, display_text),
+                user_query,
+            )
 
     if isinstance(parsed, dict) and isinstance(parsed.get("data"), str):
         blocks = _blocks_from_markdown(parsed["data"], title=parsed.get("summary") or "FlyAI 查询结果")
@@ -72,9 +105,322 @@ def normalize_output(raw_output: str) -> List[Dict[str, Any]]:
                     "items": [str(parsed["systemMessage"])],
                 }
             )
-        return blocks
+        return _postprocess_blocks(blocks, parsed["data"], user_query)
 
-    return [_markdown_fallback(_display_text(raw_output))]
+    fallback_text = _display_text(raw_output)
+    return _postprocess_blocks([_markdown_fallback(fallback_text)], fallback_text, user_query)
+
+
+def _postprocess_blocks(blocks: List[Dict[str, Any]], source_text: str, user_query: str) -> List[Dict[str, Any]]:
+    if not _wants_round_trip_flight(user_query, source_text):
+        return blocks
+    if any(_complete_round_trip_flight_card(block, source_text) for block in blocks):
+        return _label_complete_round_trip_cards(blocks, source_text)
+
+    repaired = _repair_round_trip_flight_card(source_text, blocks, user_query)
+    if repaired:
+        return _replace_or_insert_round_trip_card(blocks, repaired, source_text)
+
+    if _has_incomplete_flight_card(blocks) or _source_has_flight_number(source_text):
+        return _insert_round_trip_warning(blocks)
+    return blocks
+
+
+def _source_text_from_parsed(value: Any, fallback: str) -> str:
+    strings: List[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, str):
+            clean = item.strip()
+            if clean:
+                strings.append(clean)
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+            return
+        if isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return "\n".join(strings) or fallback
+
+
+def _wants_round_trip_flight(user_query: str, source_text: str) -> bool:
+    query = user_query or ""
+    combined = f"{query}\n{source_text or ''}"
+    has_round_trip = bool(
+        re.search(r"(往返|来回|回程|返程|往回|返回)", query)
+        or re.search(r"(往返|回程|返程)", combined)
+    )
+    if not has_round_trip:
+        return False
+    has_flight_intent = bool(
+        re.search(r"(机票|航班|飞机|直飞|起飞|航司|航空|机场|航段)", query)
+        or re.search(r"(航班|机票|航司|航空|机场|航段|起降时间)", combined)
+        or _source_has_flight_number(combined)
+    )
+    return has_flight_intent
+
+
+def _complete_round_trip_flight_card(block: Dict[str, Any], source_text: str) -> bool:
+    if block.get("type") != "flight_card":
+        return False
+    segments = [segment for segment in block.get("segments", []) if isinstance(segment, dict)]
+    if len(segments) < 2 or not _looks_like_round_trip_segments(segments):
+        return False
+    if _source_has_flight_number(source_text):
+        outbound = next((segment for segment in segments if segment.get("label") == "去程"), segments[0])
+        inbound = next((segment for segment in segments if segment.get("label") == "返程"), None)
+        if inbound is None:
+            first_dep = _segment_dep_endpoint(outbound)
+            first_arr = _segment_arr_endpoint(outbound)
+            inbound = next(
+                (
+                    segment
+                    for segment in segments[1:]
+                    if _same_endpoint(_segment_dep_endpoint(segment), first_arr)
+                    and _same_endpoint(_segment_arr_endpoint(segment), first_dep)
+                ),
+                None,
+            )
+        if not outbound.get("number") or not (inbound and inbound.get("number")):
+            return False
+    if _source_has_price(source_text) and not (block.get("price") or _total_price_from_segments(segments)):
+        return False
+    return True
+
+
+def _has_incomplete_flight_card(blocks: List[Dict[str, Any]]) -> bool:
+    return any(block.get("type") == "flight_card" for block in blocks)
+
+
+def _label_complete_round_trip_cards(blocks: List[Dict[str, Any]], source_text: str) -> List[Dict[str, Any]]:
+    labeled_blocks: List[Dict[str, Any]] = []
+    for block in blocks:
+        if not _complete_round_trip_flight_card(block, source_text):
+            labeled_blocks.append(block)
+            continue
+        cloned = dict(block)
+        segments = [dict(segment) for segment in cloned.get("segments", []) if isinstance(segment, dict)]
+        selected = _select_round_trip_segments(segments)
+        for label, selected_segment in (("去程", selected[0] if selected else None), ("返程", selected[1] if len(selected) > 1 else None)):
+            if not selected_segment:
+                continue
+            for segment in segments:
+                if _segment_signature(segment) == _segment_signature(selected_segment):
+                    segment["label"] = label
+                    break
+        cloned["segments"] = segments
+        labeled_blocks.append(cloned)
+    return labeled_blocks
+
+
+def _source_has_flight_number(text: str) -> bool:
+    return bool(_extract_flight_number(text or ""))
+
+
+def _source_has_price(text: str) -> bool:
+    return bool(_extract_price(text or ""))
+
+
+def _repair_round_trip_flight_card(
+    source_text: str,
+    blocks: List[Dict[str, Any]],
+    user_query: str,
+) -> Optional[Dict[str, Any]]:
+    candidate_sources = [source_text, f"{user_query}\n{source_text}"]
+    parsers = (
+        _round_trip_flight_table_blocks,
+        _round_trip_flight_schedule_blocks,
+        _round_trip_flight_prose_blocks,
+        _flight_table_combo_blocks,
+        _flight_combo_blocks,
+    )
+    for candidate_source in candidate_sources:
+        for parser in parsers:
+            for candidate in parser(candidate_source):
+                if _complete_round_trip_flight_card(candidate, candidate_source):
+                    return candidate
+
+    combined = _round_trip_card_from_existing_blocks(blocks, source_text, user_query)
+    if combined and _complete_round_trip_flight_card(combined, f"{user_query}\n{source_text}"):
+        return combined
+
+    generic = _generic_round_trip_flight_card(source_text, user_query)
+    if generic and _complete_round_trip_flight_card(generic, f"{user_query}\n{source_text}"):
+        return generic
+    return None
+
+
+def _replace_or_insert_round_trip_card(
+    blocks: List[Dict[str, Any]],
+    repaired: Dict[str, Any],
+    source_text: str,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    replaced = False
+    for block in blocks:
+        if block.get("type") == "flight_card" and not _complete_round_trip_flight_card(block, source_text):
+            if not replaced:
+                result.append(repaired)
+                replaced = True
+            continue
+        result.append(block)
+
+    if replaced:
+        return result
+
+    insert_at = 0
+    if result and result[0].get("type") == "notice" and result[0].get("title") == "查询结论":
+        insert_at = 1
+    for index, block in enumerate(result):
+        if block.get("type") == "guide_section":
+            insert_at = index
+            break
+    result.insert(insert_at, repaired)
+    return result
+
+
+def _insert_round_trip_warning(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    warning = {
+        "type": "notice",
+        "title": "结果可能不完整",
+        "severity": "warning",
+        "items": [
+            "检测到你查询的是往返机票，但本次 Hermes/fly.ai 输出中没有足够结构化信息生成完整往返卡片。",
+            "下方仍保留原始查询内容；建议补充明确去程和返程日期后重新查询。",
+        ],
+    }
+    if any(block.get("title") == warning["title"] for block in blocks):
+        return blocks
+    insert_at = 0
+    if blocks and blocks[0].get("type") == "notice" and blocks[0].get("title") == "查询结论":
+        insert_at = 1
+    found_target = False
+    for index, block in enumerate(blocks):
+        if block.get("type") == "flight_card":
+            insert_at = index
+            found_target = True
+            break
+    if not found_target:
+        for index, block in enumerate(blocks):
+            if block.get("type") == "guide_section":
+                insert_at = index
+                break
+    return blocks[:insert_at] + [warning] + blocks[insert_at:]
+
+
+def _round_trip_card_from_existing_blocks(
+    blocks: List[Dict[str, Any]],
+    source_text: str,
+    user_query: str,
+) -> Optional[Dict[str, Any]]:
+    segments: List[Dict[str, Any]] = []
+    for block in blocks:
+        if block.get("type") != "flight_card":
+            continue
+        for segment in block.get("segments", []):
+            if isinstance(segment, dict):
+                segments.append(dict(segment))
+    selected = _select_round_trip_segments(segments)
+    if len(selected) < 2:
+        return None
+    return _round_trip_card_from_segments(selected, source_text, user_query)
+
+
+def _generic_round_trip_flight_card(source_text: str, user_query: str) -> Optional[Dict[str, Any]]:
+    origin, destination = _extract_route_label(f"{user_query}\n{source_text}")
+    segments: List[Dict[str, Any]] = []
+    seen_lines = set()
+    for line in [*_fold_markdown_table_rows(source_text), *_fold_soft_wrapped_lines(source_text)]:
+        clean = _clean_display_line(line)
+        if not clean or clean in seen_lines:
+            continue
+        seen_lines.add(clean)
+        if not re.search(r"(去程|回程|返程)", clean):
+            continue
+        segment = _flight_segment_from_combo_line(clean, origin, destination)
+        if segment:
+            segments.append(segment)
+
+    selected = _select_round_trip_segments(_dedupe_segments(segments))
+    if len(selected) < 2:
+        return None
+    return _round_trip_card_from_segments(selected, source_text, user_query)
+
+
+def _select_round_trip_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(segments) < 2:
+        return []
+    outbound = next((segment for segment in segments if segment.get("label") == "去程"), None)
+    inbound = next((segment for segment in segments if segment.get("label") == "返程"), None)
+    if outbound and inbound:
+        return [outbound, inbound]
+
+    for index, first in enumerate(segments):
+        first_dep = _segment_dep_endpoint(first)
+        first_arr = _segment_arr_endpoint(first)
+        if not first_dep or not first_arr:
+            continue
+        for second in segments[index + 1 :]:
+            if _same_endpoint(_segment_dep_endpoint(second), first_arr) and _same_endpoint(_segment_arr_endpoint(second), first_dep):
+                selected = [dict(first), dict(second)]
+                if not selected[0].get("label"):
+                    selected[0]["label"] = "去程"
+                if not selected[1].get("label"):
+                    selected[1]["label"] = "返程"
+                return selected
+    return []
+
+
+def _dedupe_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for segment in segments:
+        signature = (
+            segment.get("label"),
+            segment.get("number"),
+            segment.get("depTime"),
+            segment.get("arrTime"),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(segment)
+    return deduped
+
+
+def _segment_signature(segment: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
+    return (
+        segment.get("number"),
+        segment.get("depTime"),
+        segment.get("arrTime"),
+        _segment_dep_endpoint(segment),
+    )
+
+
+def _round_trip_card_from_segments(
+    segments: List[Dict[str, Any]],
+    source_text: str,
+    user_query: str,
+) -> Dict[str, Any]:
+    outbound = segments[0]
+    origin = _segment_dep_endpoint(outbound)
+    destination = _segment_arr_endpoint(outbound)
+    price = _total_price_from_segments(segments) or _extract_labeled_total_price(source_text)
+    if not price:
+        price = "未返回完整票价" if any(segment.get("price") for segment in segments) else "未返回票价"
+    return {
+        "type": "flight_card",
+        "title": _round_trip_table_title(f"{user_query}\n{source_text}", origin, destination),
+        "subtitle": _round_trip_table_subtitle(source_text),
+        "price": price,
+        "number": " / ".join(segment["number"] for segment in segments if segment.get("number")),
+        "segments": segments,
+        "items": _round_trip_prose_items(source_text, has_price=price not in {"未返回票价", "未返回完整票价"}),
+    }
 
 
 def error_blocks(message: str, stderr: str = "") -> List[Dict[str, Any]]:
@@ -180,7 +526,7 @@ def _loose_json_data(text: str) -> Optional[str]:
 
 def _normalize_block(block: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(block)
-    block_type = str(normalized.get("type", "notice"))
+    block_type = _normalize_block_type(str(normalized.get("type", "notice")))
     if block_type not in ALLOWED_TYPES:
         block_type = "notice"
     normalized["type"] = block_type
@@ -215,8 +561,56 @@ def _normalize_block(block: Dict[str, Any]) -> Dict[str, Any]:
             normalized.get("columns", []),
             normalized.get("rows", []),
         )
+    if block_type in {"flight_card", "train_card"}:
+        normalized["price"] = _normalize_price_value(normalized.get("price"))
+        if isinstance(normalized.get("segments"), list):
+            normalized["segments"] = [
+                _normalize_segment(segment)
+                for segment in normalized["segments"]
+                if isinstance(segment, dict)
+            ]
 
     return normalized
+
+
+def _normalize_block_type(value: str) -> str:
+    clean = re.sub(r"\s+", "", value.strip())
+    if not clean:
+        return "notice"
+    if clean in ALLOWED_TYPES:
+        return clean
+    lowered = clean.lower()
+    if lowered in TYPE_ALIASES:
+        return TYPE_ALIASES[lowered]
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", clean).lower()
+    return TYPE_ALIASES.get(snake, snake)
+
+
+def _normalize_segment(segment: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(segment)
+    for key, value in list(normalized.items()):
+        if isinstance(value, str):
+            normalized[key] = _strip_entity_tags(value).strip()
+    if "price" in normalized:
+        normalized["price"] = _normalize_price_value(normalized.get("price"))
+    return normalized
+
+
+def _normalize_price_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    clean = value.strip()
+    if not clean:
+        return clean
+    if re.search(r"(?:¥|￥|元|免费|未返回)", clean):
+        extracted = _extract_price(clean)
+        return extracted or clean.replace("￥", "¥")
+    if re.fullmatch(r"\d{3,7}(?:\.\d+)?", clean.replace(",", "")):
+        amount = float(clean.replace(",", ""))
+        if amount.is_integer():
+            return f"¥{int(amount):,}"
+        return f"¥{amount:,.2f}"
+    return clean
 
 
 def _alias(target: Dict[str, Any], preferred: str, aliases: Iterable[str]) -> None:
@@ -276,14 +670,19 @@ def _looks_like_transport(source: Dict[str, Any], transport_type: str) -> bool:
 
 def _transport_block(source: Dict[str, Any], block_type: str) -> Dict[str, Any]:
     segments: List[Dict[str, Any]] = []
-    for journey in source.get("journeys", []):
+    journeys = source.get("journeys", [])
+    for journey_index, journey in enumerate(journeys):
         if not isinstance(journey, dict):
             continue
         for segment in journey.get("segments", []):
             if not isinstance(segment, dict):
                 continue
+            label = None
+            if block_type == "flight_card" and len(journeys) > 1:
+                label = "返程" if journey_index == 1 else "去程"
             segments.append(
                 {
+                    "label": label,
                     "depCity": segment.get("depCityName"),
                     "depStation": segment.get("depStationName"),
                     "depTime": segment.get("depDateTime"),
@@ -320,6 +719,18 @@ def _blocks_from_markdown(markdown: str, title: str = "FlyAI 查询结果") -> L
     flight_table_combo_blocks = _flight_table_combo_blocks(clean)
     if flight_table_combo_blocks:
         return flight_table_combo_blocks
+
+    round_trip_table_blocks = _round_trip_flight_table_blocks(clean)
+    if round_trip_table_blocks:
+        return round_trip_table_blocks
+
+    round_trip_schedule_blocks = _round_trip_flight_schedule_blocks(clean)
+    if round_trip_schedule_blocks:
+        return round_trip_schedule_blocks
+
+    round_trip_prose_blocks = _round_trip_flight_prose_blocks(clean)
+    if round_trip_prose_blocks:
+        return round_trip_prose_blocks
 
     flight_combo_blocks = _flight_combo_blocks(clean)
     if flight_combo_blocks:
@@ -489,7 +900,7 @@ def _flight_combo_blocks(text: str) -> List[Dict[str, Any]]:
 
 
 def _flight_table_combo_blocks(text: str) -> List[Dict[str, Any]]:
-    if "组合" not in text or "航段" not in text or "航班号" not in text:
+    if "组合" not in text or "航段" not in text or not re.search(r"航班(?:号)?", text):
         return []
 
     blocks: List[Dict[str, Any]] = []
@@ -524,6 +935,103 @@ def _flight_table_combo_blocks(text: str) -> List[Dict[str, Any]]:
         )
 
     return blocks
+
+
+def _round_trip_flight_table_blocks(text: str) -> List[Dict[str, Any]]:
+    if not re.search(r"(往返|去程|返程)", text) or "航段" not in text or not re.search(r"航班(?:号)?", text):
+        return []
+
+    segments = _flight_segments_from_markdown_table(text)
+    if len(segments) < 2 or not _looks_like_round_trip_segments(segments):
+        return []
+
+    first_segment = segments[0]
+    origin = first_segment.get("depCity") or first_segment.get("depStation")
+    destination = first_segment.get("arrCity") or first_segment.get("arrStation")
+    numbers = " / ".join(segment["number"] for segment in segments if segment.get("number"))
+    title = _round_trip_table_title(text, origin, destination)
+    return [
+        {
+            "type": "flight_card",
+            "title": title,
+            "subtitle": _round_trip_table_subtitle(text),
+            "price": _total_price_from_segments(segments) or _extract_labeled_total_price(text) or _extract_price(text),
+            "number": numbers,
+            "segments": segments,
+            "items": _extract_short_lines(text),
+        }
+    ]
+
+
+def _round_trip_flight_schedule_blocks(text: str) -> List[Dict[str, Any]]:
+    if "往返" not in text or "航班号" not in text or "路线" not in text or "时间" not in text:
+        return []
+
+    segments = _directional_schedule_segments(text)
+    if len(segments) < 2 or not _looks_like_round_trip_segments(segments):
+        return []
+
+    pair = _recommended_pair_segments(text, segments)
+    if pair:
+        selected = pair
+    else:
+        outbound = next((segment for segment in segments if segment.get("label") == "去程"), None)
+        inbound = next((segment for segment in segments if segment.get("label") == "返程"), None)
+        selected = [segment for segment in (outbound, inbound) if segment]
+
+    if len(selected) < 2:
+        return []
+
+    origin = _segment_dep_endpoint(selected[0])
+    destination = _segment_arr_endpoint(selected[0])
+    price = _total_price_from_segments(selected) or _extract_labeled_total_price(text)
+    return [
+        {
+            "type": "flight_card",
+            "title": _round_trip_schedule_title(text, origin, destination),
+            "subtitle": _round_trip_table_subtitle(text),
+            "price": price or "未返回票价",
+            "number": " / ".join(segment["number"] for segment in selected if segment.get("number")),
+            "segments": selected,
+            "items": _round_trip_prose_items(text, has_price=bool(price)),
+        }
+    ]
+
+
+def _round_trip_flight_prose_blocks(text: str) -> List[Dict[str, Any]]:
+    if not re.search(r"(去程航班|出发航班|去程\s*[：:].*?(?:→|->|-))", text) or not re.search(
+        r"(回程航班|返程航班|返程\s*[：:].*?(?:→|->|-)|回程\s*[：:].*?(?:→|->|-))",
+        text,
+    ):
+        return []
+
+    details = _flight_detail_segments(text)
+    selected_numbers = _recommended_round_trip_numbers(text)
+    if selected_numbers:
+        segments = [details[number] for number in selected_numbers if number in details]
+    else:
+        outbound = next((segment for segment in details.values() if segment.get("label") == "去程"), None)
+        inbound = next((segment for segment in details.values() if segment.get("label") == "返程"), None)
+        segments = [segment for segment in (outbound, inbound) if segment]
+
+    if len(segments) < 2 or not _looks_like_round_trip_segments(segments):
+        return []
+
+    origin = _segment_dep_endpoint(segments[0])
+    destination = _segment_arr_endpoint(segments[0])
+    numbers = " / ".join(segment["number"] for segment in segments if segment.get("number"))
+    price = _extract_labeled_total_price(text) or _total_price_from_segments(segments)
+    return [
+        {
+            "type": "flight_card",
+            "title": _round_trip_prose_title(text, origin, destination),
+            "subtitle": _round_trip_prose_subtitle(text),
+            "price": price or "未返回票价",
+            "number": numbers,
+            "segments": segments,
+            "items": _round_trip_prose_items(text, has_price=bool(price)),
+        }
+    ]
 
 
 def _spot_entity_blocks(text: str) -> List[Dict[str, Any]]:
@@ -699,20 +1207,23 @@ def _spot_entity_name(payload: str) -> Optional[str]:
 def _flight_segments_from_markdown_table(text: str) -> List[Dict[str, Any]]:
     segments: List[Dict[str, Any]] = []
     in_flight_table = False
+    headers: List[str] = []
+    route_hint = _extract_route_label(text)
     for line in _fold_markdown_table_rows(text):
         if not line.startswith("|"):
             continue
         cells = [re.sub(r"\s+", " ", cell).strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) < 5:
             continue
-        if "航段" in cells[0] and any("航班号" in cell for cell in cells):
+        if "航段" in cells[0] and any(re.search(r"航班(?:号)?", cell) for cell in cells):
             in_flight_table = True
+            headers = cells
             continue
         if re.fullmatch(r"[-:\s]+", "".join(cells)):
             continue
         if not in_flight_table:
             continue
-        segment = _flight_segment_from_table_cells(cells)
+        segment = _flight_segment_from_table_cells(cells, headers, route_hint)
         if segment:
             segments.append(segment)
     return segments
@@ -733,7 +1244,7 @@ def _fold_markdown_table_rows(text: str) -> List[str]:
             if pending:
                 rows.append(pending)
             pending = clean
-            if "航段" in clean and "价格" in clean:
+            if "航段" in clean and ("价格" in clean or "票价" in clean):
                 expected_pipes = clean.count("|")
             if expected_pipes and pending.count("|") >= expected_pipes:
                 rows.append(pending)
@@ -754,17 +1265,47 @@ def _fold_markdown_table_rows(text: str) -> List[str]:
     return rows
 
 
-def _flight_segment_from_table_cells(cells: List[str]) -> Optional[Dict[str, Any]]:
+def _flight_segment_from_table_cells(
+    cells: List[str],
+    headers: Optional[List[str]] = None,
+    route_hint: Tuple[Optional[str], Optional[str]] = (None, None),
+) -> Optional[Dict[str, Any]]:
     if len(cells) < 6:
         return None
-    route_cell, date_cell, flight_cell, dep_cell, arr_cell, price_cell = cells[:6]
+    headers = headers or []
+    route_cell = _table_cell(cells, headers, "航段") or cells[0]
+    date_cell = _table_cell(cells, headers, "日期") or cells[1]
+    flight_cell = _table_cell(cells, headers, "航班号") or _table_cell(cells, headers, "航班") or cells[2]
+    dep_cell = _table_cell(cells, headers, "出发") or cells[3]
+    arr_cell = _table_cell(cells, headers, "到达") or cells[4]
+    price_cell = _table_cell(cells, headers, "价格") or _table_cell(cells, headers, "票价") or cells[-1]
+    duration_cell = _table_cell(cells, headers, "时长") or _table_cell(cells, headers, "耗时")
     origin, destination = _city_pair_from_route_cell(route_cell)
     number = _extract_flight_number(flight_cell)
-    dep_station, dep_time = _split_station_time(dep_cell)
-    arr_station, arr_time = _split_station_time(arr_cell)
+    label = _flight_segment_label(route_cell)
+    time_cell = _table_cell(cells, headers, "起降时间") or _table_cell(cells, headers, "时间")
+    airport_cell = _table_cell(cells, headers, "机场")
+    if time_cell and airport_cell:
+        dep_time, arr_time = _extract_time_pair(time_cell)
+        dep_station, arr_station = _station_pair_from_route_cell(airport_cell)
+    else:
+        dep_station, dep_time = _split_station_time(dep_cell)
+        arr_station, arr_time = _split_station_time(arr_cell)
     if not number or not dep_time or not arr_time:
         return None
+    if not origin and not destination and label and route_hint[0] and route_hint[1]:
+        if label == "返程":
+            origin, destination = route_hint[1], route_hint[0]
+        else:
+            origin, destination = route_hint[0], route_hint[1]
+    dep_city, dep_station = _infer_city_and_clean_station(dep_station)
+    arr_city, arr_station = _infer_city_and_clean_station(arr_station)
+    if not origin:
+        origin = dep_city
+    if not destination:
+        destination = arr_city
     return {
+        "label": label,
         "depCity": origin,
         "depStation": dep_station,
         "depTime": _join_date_time(date_cell, dep_time),
@@ -773,8 +1314,16 @@ def _flight_segment_from_table_cells(cells: List[str]) -> Optional[Dict[str, Any
         "arrTime": arr_time,
         "carrier": _extract_carrier_from_flight_cell(flight_cell, number),
         "number": number,
+        "duration": _normalize_duration(duration_cell),
         "price": _extract_price(price_cell),
     }
+
+
+def _table_cell(cells: List[str], headers: List[str], header_keyword: str) -> Optional[str]:
+    for index, header in enumerate(headers):
+        if header_keyword in header and index < len(cells):
+            return cells[index]
+    return None
 
 
 def _city_pair_from_route_cell(route_cell: str) -> Tuple[Optional[str], Optional[str]]:
@@ -782,6 +1331,27 @@ def _city_pair_from_route_cell(route_cell: str) -> Tuple[Optional[str], Optional
         return None, None
     left, right = re.split(r"\s*(?:→|->|－|-|—)\s*", route_cell, maxsplit=1)
     return _compact_route_endpoint(left), _compact_route_endpoint(right)
+
+
+def _flight_segment_label(route_cell: str) -> Optional[str]:
+    if "返程" in route_cell or "回程" in route_cell:
+        return "返程"
+    if "去程" in route_cell:
+        return "去程"
+    return None
+
+
+def _infer_city_and_clean_station(station: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not station:
+        return None, station
+    for city in sorted(ROUTE_CITIES, key=len, reverse=True):
+        if station.startswith(city):
+            clean_station = station[len(city) :].strip(" -:：")
+            return city, clean_station or station
+    for city in sorted(ROUTE_CITIES, key=len, reverse=True):
+        if city in station:
+            return city, station
+    return None, station
 
 
 def _split_station_time(value: str) -> Tuple[Optional[str], Optional[str]]:
@@ -795,6 +1365,356 @@ def _split_station_time(value: str) -> Tuple[Optional[str], Optional[str]]:
 def _extract_carrier_from_flight_cell(value: str, number: str) -> Optional[str]:
     carrier = value.replace(number, "", 1).strip(" -:：")
     return carrier or None
+
+
+def _directional_schedule_segments(text: str) -> List[Dict[str, Any]]:
+    segments: List[Dict[str, Any]] = []
+    current_origin: Optional[str] = None
+    current_destination: Optional[str] = None
+    current_label: Optional[str] = None
+    first_origin: Optional[str] = None
+    first_destination: Optional[str] = None
+    headers: List[str] = []
+
+    for line in _fold_markdown_table_rows(text):
+        clean = _clean_display_line(line)
+        if not clean:
+            continue
+
+        if not clean.startswith("|"):
+            pair = _city_pair_from_route_cell(clean)
+            if pair[0] and pair[1] and _looks_like_city_route(pair):
+                current_origin, current_destination = pair
+                if first_origin is None:
+                    first_origin, first_destination = pair
+                    current_label = "去程"
+                elif _same_endpoint(current_origin, first_destination) and _same_endpoint(current_destination, first_origin):
+                    current_label = "返程"
+                else:
+                    current_label = None
+                headers = []
+            continue
+
+        if not current_label or not current_origin or not current_destination:
+            continue
+        cells = [re.sub(r"\s+", " ", cell).strip() for cell in clean.strip().strip("|").split("|")]
+        if len(cells) < 5:
+            continue
+        if any("航班号" in cell for cell in cells) and any("时间" in cell for cell in cells):
+            headers = cells
+            continue
+        if re.fullmatch(r"[-:\s]+", "".join(cells)):
+            continue
+        segment = _flight_segment_from_schedule_cells(cells, headers, current_label, current_origin, current_destination)
+        if segment:
+            segments.append(segment)
+
+    return segments
+
+
+def _looks_like_city_route(pair: Tuple[Optional[str], Optional[str]]) -> bool:
+    return bool(pair[0] in ROUTE_CITIES and pair[1] in ROUTE_CITIES)
+
+
+def _flight_segment_from_schedule_cells(
+    cells: List[str],
+    headers: List[str],
+    label: str,
+    origin: str,
+    destination: str,
+) -> Optional[Dict[str, Any]]:
+    flight_cell = _table_cell(cells, headers, "航班号") or cells[0]
+    carrier_cell = _table_cell(cells, headers, "航司") or _table_cell(cells, headers, "航空公司") or (cells[1] if len(cells) > 1 else "")
+    route_cell = _table_cell(cells, headers, "路线") or _table_cell(cells, headers, "航线") or (cells[2] if len(cells) > 2 else "")
+    time_cell = _table_cell(cells, headers, "时间") or (cells[3] if len(cells) > 3 else "")
+    duration_cell = _table_cell(cells, headers, "时长") or _table_cell(cells, headers, "耗时")
+    price_cell = _table_cell(cells, headers, "价格") or ""
+
+    number = _extract_flight_number(flight_cell)
+    dep_time, arr_time = _extract_time_pair(time_cell)
+    dep_station, arr_station = _station_pair_from_route_cell(route_cell)
+    if not number or not dep_time or not arr_time:
+        return None
+    return {
+        "label": label,
+        "depCity": origin,
+        "depStation": dep_station,
+        "depTime": dep_time,
+        "arrCity": destination,
+        "arrStation": arr_station,
+        "arrTime": arr_time,
+        "carrier": carrier_cell or _extract_carrier_from_flight_cell(flight_cell, number),
+        "number": number,
+        "duration": _normalize_duration(duration_cell),
+        "price": _extract_price(price_cell),
+    }
+
+
+def _station_pair_from_route_cell(route_cell: str) -> Tuple[Optional[str], Optional[str]]:
+    if not re.search(r"(→|->|－|-|—)", route_cell):
+        return None, None
+    left, right = re.split(r"\s*(?:→|->|－|-|—)\s*", route_cell, maxsplit=1)
+    return _clean_route_endpoint(left, is_left=True), _clean_route_endpoint(right, is_left=False)
+
+
+def _recommended_pair_segments(text: str, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_number = {segment.get("number"): segment for segment in segments if segment.get("number")}
+    for left, right in re.findall(r"\b([A-Z0-9]{2,6}\d{2,4})\s*/\s*([A-Z0-9]{2,6}\d{2,4})\b", text, flags=re.IGNORECASE):
+        first = by_number.get(left.upper())
+        second = by_number.get(right.upper())
+        if not first or not second:
+            continue
+        if {first.get("label"), second.get("label")} == {"去程", "返程"}:
+            return [first, second] if first.get("label") == "去程" else [second, first]
+    return []
+
+
+def _round_trip_schedule_title(text: str, origin: Optional[str], destination: Optional[str]) -> str:
+    first = _first_meaningful_line(_strip_entity_tags(text))
+    if first and re.search(r"(往返|航班|机票)", first) and len(first) <= 46:
+        return first
+    if origin and destination:
+        return f"往返航班候选：{origin} ↔ {destination}"
+    return "往返航班候选"
+
+
+def _flight_detail_segments(text: str) -> Dict[str, Dict[str, Any]]:
+    segments: Dict[str, Dict[str, Any]] = {}
+    current_label: Optional[str] = None
+    current_origin: Optional[str] = None
+    current_destination: Optional[str] = None
+    current_number: Optional[str] = None
+    current_lines: List[str] = []
+    dates = _round_trip_dates(text)
+
+    def flush() -> None:
+        nonlocal current_number, current_lines
+        if not current_number:
+            return
+        segment = _flight_segment_from_detail_lines(
+            current_number,
+            current_lines,
+            current_label,
+            current_origin,
+            current_destination,
+            dates.get(current_label or ""),
+        )
+        if segment:
+            segments[current_number] = segment
+        current_number = None
+        current_lines = []
+
+    for raw_line in text.splitlines():
+        clean = _clean_display_line(raw_line)
+        if not clean:
+            continue
+        if re.search(r"(去程航班|出发航班|去程\s*[：:].*?(?:→|->|-))", clean) and not _extract_flight_number(clean):
+            flush()
+            current_label = "去程"
+            current_origin, current_destination = _city_pair_from_route_cell(clean)
+            continue
+        if re.search(r"(回程航班|返程航班|返程\s*[：:].*?(?:→|->|-)|回程\s*[：:].*?(?:→|->|-))", clean) and not _extract_flight_number(clean):
+            flush()
+            current_label = "返程"
+            current_origin, current_destination = _city_pair_from_route_cell(clean)
+            continue
+
+        number = _line_flight_number(clean)
+        if number and current_label:
+            flush()
+            current_number = number
+            remainder = clean.replace(number, "", 1).strip(" -:：")
+            current_lines = [remainder] if remainder else []
+            continue
+
+        if current_number:
+            current_lines.append(clean)
+
+    flush()
+    return segments
+
+
+def _flight_segment_from_detail_lines(
+    number: str,
+    lines: List[str],
+    label: Optional[str],
+    origin: Optional[str],
+    destination: Optional[str],
+    date_text: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    body = "\n".join(line for line in lines if line)
+    dep_time, dep_station, arr_time, arr_station = _flight_detail_time(body)
+    if not dep_time or not arr_time:
+        return None
+    dep_city, dep_station = _infer_city_and_clean_station(dep_station)
+    arr_city, arr_station = _infer_city_and_clean_station(arr_station)
+    return {
+        "label": label,
+        "depCity": dep_city or origin,
+        "depStation": dep_station,
+        "depTime": _join_date_time(date_text, dep_time),
+        "arrCity": arr_city or destination,
+        "arrStation": arr_station,
+        "arrTime": arr_time,
+        "carrier": _extract_labeled_value(body, ["航空公司", "航司", "承运方"]) or _extract_carrier_from_flight_cell(lines[0], number) if lines else None,
+        "number": number,
+        "duration": _extract_duration(body),
+        "price": _extract_price(body),
+    }
+
+
+def _flight_detail_time(text: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    match = re.search(
+        r"(\d{1,2}:\d{2})\s*[（(]([^）)]+)[）)]\s*(?:→|->|至)\s*(\d{1,2}:\d{2})\s*[（(]([^）)]+)[）)]",
+        text,
+    )
+    if match:
+        return match.group(1), match.group(2).strip(), match.group(3), match.group(4).strip()
+
+    dep_time, arr_time = _extract_time_pair(text)
+    route = _extract_route_pair(text, allow_time=True)
+    return dep_time, route[0], arr_time, route[1]
+
+
+def _line_flight_number(line: str) -> Optional[str]:
+    number = _extract_flight_number(line)
+    if not number:
+        return None
+    without_number = line.replace(number, "", 1).strip(" -:：")
+    if len(without_number) > 24 or re.search(r"(时间|航空公司|价格|时长|特点|去程|回程|返程)", without_number):
+        return None
+    return number
+
+
+def _recommended_round_trip_numbers(text: str) -> List[str]:
+    selected: List[str] = []
+    in_recommendation = False
+    for line in _fold_soft_wrapped_lines(text):
+        if re.search(r"推荐组合", line):
+            in_recommendation = True
+            continue
+        if not in_recommendation:
+            continue
+        has_direction = bool(re.search(r"(去程|回程|返程)", line))
+        if has_direction:
+            number = _extract_flight_number(line)
+            if number and number not in selected:
+                selected.append(number)
+            if len(selected) >= 2:
+                break
+            continue
+        if re.search(r"(当前为体验模式|Session:|Resume this session|⚠️)", line):
+            break
+    return selected
+
+
+def _round_trip_dates(text: str) -> Dict[str, Optional[str]]:
+    dates: Dict[str, Optional[str]] = {"去程": None, "返程": None}
+    match = re.search(
+        r"去程\s*[：:]\s*(\d{1,2}\s*月\s*\d{1,2}\s*日(?:[（(][^）)]+[）)])?).{0,80}?"
+        r"(?:回程|返程)\s*[：:]\s*(\d{1,2}\s*月\s*\d{1,2}\s*日(?:[（(][^）)]+[）)])?)",
+        text,
+        flags=re.DOTALL,
+    )
+    if match:
+        dates["去程"] = match.group(1)
+        dates["返程"] = match.group(2)
+    return dates
+
+
+def _round_trip_prose_title(text: str, origin: Optional[str], destination: Optional[str]) -> str:
+    base = "推荐往返航班组合"
+    first = _first_meaningful_line(_strip_entity_tags(text))
+    if first and re.search(r"(往返|机票|航班)", first) and len(first) <= 42:
+        base = re.sub(r"推荐$", "推荐", first).strip()
+    if origin and destination and "↔" not in base:
+        return f"{base}：{origin} ↔ {destination}"
+    return base
+
+
+def _round_trip_prose_subtitle(text: str) -> Optional[str]:
+    for line in _fold_soft_wrapped_lines(text):
+        if "停留" in line and len(line) <= 80:
+            return line
+    return None
+
+
+def _round_trip_prose_items(text: str, has_price: bool) -> List[str]:
+    items = _extract_short_lines(text)
+    if not has_price and re.search(r"(暂未提供具体日期的实时票价|未提供.*票价|价格.*受限)", text):
+        notice = "本次 fly.ai 未返回实时票价，无法确认最低价。"
+        if notice not in items:
+            items.insert(0, notice)
+    return items
+
+
+def _looks_like_round_trip_segments(segments: List[Dict[str, Any]]) -> bool:
+    labels = {segment.get("label") for segment in segments}
+    if {"去程", "返程"}.issubset(labels):
+        return True
+    if len(segments) < 2:
+        return False
+    first_dep = _segment_dep_endpoint(segments[0])
+    first_arr = _segment_arr_endpoint(segments[0])
+    if not first_dep or not first_arr:
+        return False
+    return any(
+        _same_endpoint(_segment_dep_endpoint(segment), first_arr)
+        and _same_endpoint(_segment_arr_endpoint(segment), first_dep)
+        for segment in segments[1:]
+    )
+
+
+def _segment_dep_endpoint(segment: Dict[str, Any]) -> Optional[str]:
+    return segment.get("depCity") or segment.get("depStation")
+
+
+def _segment_arr_endpoint(segment: Dict[str, Any]) -> Optional[str]:
+    return segment.get("arrCity") or segment.get("arrStation")
+
+
+def _same_endpoint(left: Optional[str], right: Optional[str]) -> bool:
+    if not left or not right:
+        return False
+    return _compact_route_endpoint(left) == _compact_route_endpoint(right)
+
+
+def _round_trip_table_title(text: str, origin: Optional[str], destination: Optional[str]) -> str:
+    base = "往返航班"
+    for line in _fold_soft_wrapped_lines(text):
+        if "推荐最低总价方案" in line:
+            base = "推荐最低总价方案"
+            break
+        if "推荐最低票价往返组合" in line:
+            base = "推荐最低票价往返组合"
+            break
+        if "最低票价往返组合" in line:
+            base = "最低票价往返组合"
+            break
+    if origin and destination:
+        return f"{base}：{origin} ↔ {destination}"
+    return base
+
+
+def _round_trip_table_subtitle(text: str) -> Optional[str]:
+    for line in _fold_soft_wrapped_lines(text):
+        if "停留" in line and len(line) <= 80:
+            return line
+    return None
+
+
+def _total_price_from_segments(segments: List[Dict[str, Any]]) -> Optional[str]:
+    amounts: List[int] = []
+    for segment in segments:
+        price = segment.get("price")
+        if not price:
+            continue
+        match = re.search(r"[\d,]+", str(price))
+        if match:
+            amounts.append(int(match.group(0).replace(",", "")))
+    if len(amounts) < 2:
+        return None
+    return f"¥{sum(amounts):,}"
 
 
 def _combo_subtitle(body: str) -> Optional[str]:
@@ -854,6 +1774,14 @@ def _extract_route_label(text: str) -> Tuple[Optional[str], Optional[str]]:
     match = re.search(r"([\u4e00-\u9fffA-Za-z]{2,14})\s*[↔⇄]\s*([\u4e00-\u9fffA-Za-z]{2,14})", text)
     if match:
         return _compact_route_endpoint(match.group(1)), _compact_route_endpoint(match.group(2))
+    for origin in sorted(ROUTE_CITIES, key=len, reverse=True):
+        for destination in sorted(ROUTE_CITIES, key=len, reverse=True):
+            if origin == destination:
+                continue
+            if re.search(rf"{re.escape(origin)}\s*(?:到|至|飞|→|->|-)\s*{re.escape(destination)}", text):
+                return origin, destination
+            if re.search(rf"{re.escape(origin)}.{{0,8}}{re.escape(destination)}.{{0,8}}(?:往返|来回)", text):
+                return origin, destination
     return None, None
 
 
@@ -867,7 +1795,7 @@ def _compact_route_endpoint(value: str) -> str:
 
 def _flight_segment_from_combo_line(line: str, origin: Optional[str], destination: Optional[str]) -> Optional[Dict[str, Any]]:
     clean = _clean_markdown_text(line)
-    if not re.search(r"(去程|回程)", clean):
+    if not re.search(r"(去程|回程|返程)", clean):
         return None
     number = _extract_flight_number(clean)
     dep_time, arr_time = _extract_time_pair(clean)
@@ -875,11 +1803,13 @@ def _flight_segment_from_combo_line(line: str, origin: Optional[str], destinatio
     if not number or not dep_time or not arr_time:
         return None
 
-    direction = "return" if "回程" in clean else "outbound"
+    direction = "return" if re.search(r"(回程|返程)", clean) else "outbound"
+    label = "返程" if direction == "return" else "去程"
     date_match = re.search(r"(\d{1,2}\s*月\s*\d{1,2}\s*日|\d{1,2}/\d{1,2})", clean)
     carrier = _extract_carrier_after_number(clean, number)
     dep_station, arr_station = _direction_stations(direction, origin, destination)
     return {
+        "label": label,
         "depStation": dep_station,
         "depTime": _join_date_time(date_match.group(1) if date_match else None, dep_time),
         "arrStation": arr_station,
@@ -1061,9 +1991,24 @@ def _extract_price(text: str) -> Optional[str]:
 def _extract_duration(text: str) -> Optional[str]:
     labeled = _extract_labeled_value(text, ["历时", "耗时", "用时", "时长", "飞行时间", "行程时间"])
     if labeled:
-        return labeled
+        return _normalize_duration(labeled)
     match = re.search(r"(?:约\s*)?\d+\s*小时(?:\s*\d+\s*分钟)?|(?:约\s*)?\d+\s*分钟", text)
     return re.sub(r"\s+", "", match.group(0)) if match else None
+
+
+def _normalize_duration(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    clean = re.sub(r"\s+", "", str(value))
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)h(?:(\d+)m?)?", clean, flags=re.IGNORECASE)
+    if match:
+        hours = match.group(1)
+        minutes = match.group(2)
+        return f"{hours}小时{minutes}分钟" if minutes else f"{hours}小时"
+    match = re.fullmatch(r"(\d+)m", clean, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}分钟"
+    return clean
 
 
 def _extract_labeled_value(text: str, labels: List[str]) -> Optional[str]:
@@ -1102,6 +2047,7 @@ def _split_route_line(line: str) -> Optional[Tuple[str, str]]:
 def _clean_route_endpoint(value: str, is_left: bool) -> str:
     text = re.sub(r"\d{1,2}:\d{2}", "", value)
     if is_left:
+        text = re.sub(r"^.*(?:出发\s*/\s*到达|出发到达)\s*[:：]?\s*", "", text)
         text = re.sub(r"^.*(?:出发站|始发站|出发|始发|起飞|起点)\s*[:：]?\s*", "", text)
     else:
         text = re.sub(r"^\s*(?:到达站|终到站|到达|抵达|降落|终点)\s*[:：]?\s*", "", text)
