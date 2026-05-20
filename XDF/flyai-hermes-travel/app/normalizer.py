@@ -65,6 +65,35 @@ ROUTE_CITIES = [
     "洛杉矶",
 ]
 
+STRUCTURAL_SOURCE_KEYS = {
+    "type",
+    "title",
+    "price",
+    "number",
+    "label",
+    "depCity",
+    "depStation",
+    "depTime",
+    "arrCity",
+    "arrStation",
+    "arrTime",
+    "carrier",
+    "seat",
+    "duration",
+    "segments",
+    "columns",
+    "rows",
+    "bookingUrl",
+    "booking_url",
+    "jumpUrl",
+    "detailUrl",
+    "url",
+    "imageUrl",
+    "image_url",
+    "picUrl",
+    "mainPic",
+}
+
 
 def normalize_output(raw_output: str, user_query: str = "") -> List[Dict[str, Any]]:
     parsed = _parse_json(raw_output)
@@ -136,7 +165,9 @@ def _source_text_from_parsed(value: Any, fallback: str) -> str:
                 strings.append(clean)
             return
         if isinstance(item, dict):
-            for child in item.values():
+            for key, child in item.items():
+                if key in STRUCTURAL_SOURCE_KEYS:
+                    continue
                 collect(child)
             return
         if isinstance(item, list):
@@ -411,7 +442,7 @@ def _round_trip_card_from_segments(
     destination = _segment_arr_endpoint(outbound)
     price = _total_price_from_segments(segments) or _extract_labeled_total_price(source_text)
     if not price:
-        price = "未返回完整票价" if any(segment.get("price") for segment in segments) else "未返回票价"
+        price = "未返回完整票价" if any(_has_real_price(segment.get("price")) for segment in segments) else "未返回票价"
     return {
         "type": "flight_card",
         "title": _round_trip_table_title(f"{user_query}\n{source_text}", origin, destination),
@@ -1738,7 +1769,7 @@ def _total_price_from_segments(segments: List[Dict[str, Any]]) -> Optional[str]:
     amounts: List[int] = []
     for segment in segments:
         price = segment.get("price")
-        if not price:
+        if not _has_real_price(price):
             continue
         match = re.search(r"[\d,]+", str(price))
         if match:
@@ -1746,6 +1777,15 @@ def _total_price_from_segments(segments: List[Dict[str, Any]]) -> Optional[str]:
     if len(amounts) < 2:
         return None
     return f"¥{sum(amounts):,}"
+
+
+def _has_real_price(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text or re.search(r"(未返回|暂无|待查|查价|查询价格|无具体票价)", text):
+        return False
+    return bool(_extract_price(text))
 
 
 def _combo_subtitle(body: str) -> Optional[str]:

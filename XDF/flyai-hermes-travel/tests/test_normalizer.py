@@ -112,6 +112,23 @@ CZ648","segments":[{"label":"去程","depCity":"北京","depStation":"首都
     assert blocks[1]["segments"][1]["price"] == "¥2148"
 
 
+def test_combines_round_trip_candidates_without_placeholder_price_or_structural_items():
+    raw = """
+{"summary":"2026年端午节（6月19日）北京↔东京直飞往返，推荐上午去程CA181/NH964，下午/晚上返程NH963/JL025，但flyai未返回具体票价，需到平台实时查询价格。","blocks":[{"type":"flight_card","title":"北京→东京 去程（端午节上午出发）","price":"未返回票价","number":"CA181 / NH964 / MU4200 / JL5074 / CA925","segments":[{"label":"去程","depCity":"北京","depStation":"首都国际机场(PEK) / 大兴国际机场(PKX)","depTime":"08:05-09:40（上午）","arrCity":"东京","arrStation":"羽田机场(HND) / 成田国际机场(NRT)","arrTime":"12:25-14:00（东京时间）","carrier":"中国国航 / 全日空 / 东航 / 日航","number":"CA181 / NH964 / MU4200 / JL5074 / CA925","price":"未返回票价"}],"items":["CA181 08:05→12:25 国航 PEK→HND","NH964 08:20→12:55 全日空 PEK→HND"]},{"type":"flight_card","title":"东京→北京 返程（下午或晚上出发）","price":"未返回票价","number":"NH963 / CA168 / JL025 / MU790 / CA422","segments":[{"label":"返程","depCity":"东京","depStation":"羽田机场(HND)","depTime":"16:35-21:10（日本时间）","arrCity":"北京","arrStation":"首都国际机场(PEK) / 大兴国际机场(PKX)","arrTime":"19:45-00:05+1（北京时间）","carrier":"全日空 / 中国国航 / 日航 / 东航","number":"NH963 / CA168 / JL025 / MU790 / CA422","price":"未返回票价"}],"items":["NH963 17:15→20:15 全日空 HND→PEK","JL025 16:35→19:45 日航 HND→PEK"]},{"type":"notice","title":"平台提示","items":["flyai未返回具体票价，请点击下方链接前往飞猪查看实时最低票价。"]}]}
+"""
+
+    blocks = normalize_output(raw, "北京东京往返机票，要最低票价")
+
+    assert blocks[1]["type"] == "flight_card"
+    assert blocks[1]["price"] == "未返回票价"
+    assert "未返回完整票价" not in str(blocks)
+    assert len(blocks[1]["segments"]) == 2
+    assert blocks[1]["segments"][0]["label"] == "去程"
+    assert blocks[1]["segments"][1]["label"] == "返程"
+    assert "flight_card" not in str(blocks[1].get("items", []))
+    assert "北京→东京 去程" not in str(blocks[1].get("items", []))
+
+
 def test_converts_hotel_item_list():
     raw = """
     {
