@@ -8,14 +8,26 @@ const queryButton = document.querySelector("#queryButton");
 const results = document.querySelector("#results");
 const resultMeta = document.querySelector("#resultMeta");
 const historyList = document.querySelector("#historyList");
+const historySearch = document.querySelector("#historySearch");
 const refreshHistory = document.querySelector("#refreshHistory");
 const healthStatus = document.querySelector("#healthStatus");
 const quotaStatus = document.querySelector("#quotaStatus");
 const adminLink = document.querySelector("#adminLink");
 const logoutButton = document.querySelector("#logoutButton");
+const promptChips = document.querySelector("#promptChips");
+const queryCount = document.querySelector("#queryCount");
+const clearQueryButton = document.querySelector("#clearQueryButton");
 let activeStreamLog = null;
 let activeStreamText = "";
 let currentUser = null;
+let historyItems = [];
+
+const promptTemplates = [
+  "北京东京往返机票，停留 5 晚，上午北京出发，下午或晚上东京返回，不转机，给我最低价方案，要航班号和价格。",
+  "上海出发，暑假夫妻两个人出国游 7 天，价差和非暑假差距不要太大，安全、发达、直飞，不要重要转机。",
+  "杭州西湖附近 5 月 20 到 22 号酒店，预算每晚 800 以内，优先评分高、交通方便。",
+  "成都 4 天 3 晚亲子旅行攻略，节奏不要太赶，给每天安排和适合住的区域。",
+];
 
 async function request(path, options = {}) {
   const response = await fetch(path.replace(/^\//, ""), {
@@ -40,11 +52,14 @@ function setAuthenticated(value) {
 }
 
 async function boot() {
+  renderPromptChips();
+  updateQueryCount();
   await loadHealth();
   try {
     await loadMe();
     setAuthenticated(true);
     await loadHistory();
+    renderEmptyState();
   } catch {
     setAuthenticated(false);
   }
@@ -80,6 +95,7 @@ loginForm.addEventListener("submit", async (event) => {
     await loadMe();
     setAuthenticated(true);
     await loadHistory();
+    renderEmptyState();
   } catch (error) {
     passwordInput.focus();
     passwordInput.value = "";
@@ -95,7 +111,7 @@ queryForm.addEventListener("submit", async (event) => {
   queryButton.disabled = true;
   queryButton.textContent = "查询中";
   resultMeta.classList.add("is-visible");
-  resultMeta.textContent = "Hermes 正在调用 flyai skill...";
+  resultMeta.textContent = "正在理解需求并准备调用 flyai...";
   renderStreamShell();
 
   try {
@@ -116,7 +132,14 @@ queryForm.addEventListener("submit", async (event) => {
   }
 });
 
+queryInput.addEventListener("input", updateQueryCount);
+clearQueryButton.addEventListener("click", () => {
+  queryInput.value = "";
+  updateQueryCount();
+  queryInput.focus();
+});
 refreshHistory.addEventListener("click", loadHistory);
+historySearch.addEventListener("input", () => renderHistory(historyItems));
 logoutButton.addEventListener("click", logout);
 
 async function logout() {
@@ -129,23 +152,32 @@ async function logout() {
   results.innerHTML = "";
   resultMeta.classList.remove("is-visible");
   setAuthenticated(false);
+  updateQueryCount();
   passwordInput.focus();
 }
 
 async function loadHistory() {
-  const items = await request("/api/history");
+  historyItems = await request("/api/history");
+  renderHistory(historyItems);
+}
+
+function renderHistory(items) {
   historyList.innerHTML = "";
-  if (!items.length) {
-    historyList.innerHTML = `<p class="small">暂无查询历史</p>`;
+  const keyword = historySearch.value.trim().toLowerCase();
+  const visible = keyword
+    ? items.filter((item) => item.query.toLowerCase().includes(keyword))
+    : items;
+  if (!visible.length) {
+    historyList.innerHTML = `<p class="small">${items.length ? "没有匹配的历史" : "暂无查询历史"}</p>`;
     return;
   }
 
-  for (const item of items) {
+  for (const item of visible) {
     const button = document.createElement("button");
     button.className = "history-item";
     button.innerHTML = `
       <strong>${escapeHtml(item.query)}</strong>
-      <span>${formatDate(item.created_at)} · ${item.status} · ${item.duration_ms}ms</span>
+      <span>${formatDate(item.created_at)} · ${statusText(item.status)} · ${durationText(item.duration_ms)}</span>
     `;
     button.addEventListener("click", () => {
       queryInput.value = item.query;
@@ -167,13 +199,14 @@ function renderUserState() {
   const userLabel = currentUser.label || "用户";
   const quotaText = quota.unlimited ? "不限次数" : `今日剩余 ${quota.remaining_today}/${quota.daily_limit}`;
   quotaStatus.textContent = `${userLabel} · ${quotaText}`;
+  quotaStatus.title = `单用户并发 ${quota.max_concurrent || 1} · 超时 ${quota.timeout_seconds || 300}s`;
   quotaStatus.classList.toggle("warn", !quota.unlimited && quota.remaining_today <= 1);
   adminLink.classList.toggle("is-hidden", currentUser.role !== "owner");
 }
 
 function renderResult(data) {
   resultMeta.classList.add("is-visible");
-  resultMeta.textContent = `${data.status === "success" ? "查询完成" : "查询异常"} · ${data.duration_ms}ms · ${formatDate(data.created_at)}`;
+  resultMeta.textContent = `${data.status === "success" ? "查询完成" : "查询异常"} · ${durationText(data.duration_ms)} · ${formatDate(data.created_at)}`;
   activeStreamLog = null;
   activeStreamText = "";
   renderBlocks(data.blocks || []);
@@ -268,8 +301,9 @@ function renderStreamShell() {
   card.innerHTML = `
     <div class="card-body">
       <div class="card-title">
-        <h3>Hermes 实时反馈</h3>
+        <h3>实时查询进度</h3>
       </div>
+      <p class="small">复杂行程通常需要几十秒。页面保持打开即可，结果完成后会自动替换为卡片。</p>
       <pre class="stream-log" aria-live="polite"></pre>
     </div>
   `;
@@ -306,6 +340,20 @@ function renderBlocks(blocks) {
   for (const block of blocks) {
     results.appendChild(renderBlock(block));
   }
+}
+
+function renderEmptyState() {
+  if (results.children.length) return;
+  results.innerHTML = `
+    <article class="empty-state">
+      <div class="empty-map" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div>
+        <p class="section-label">准备查询</p>
+        <h2>先从一个具体问题开始</h2>
+        <p>说清楚城市、日期、人数、预算和偏好。往返机票请明确去程和返程要求，系统会优先生成双段航班卡片。</p>
+      </div>
+    </article>
+  `;
 }
 
 function renderBlock(block) {
@@ -495,6 +543,29 @@ function appendBooking(container, url) {
   container.appendChild(link);
 }
 
+function renderPromptChips() {
+  promptChips.innerHTML = "";
+  promptTemplates.forEach((template, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "prompt-chip";
+    button.textContent = ["往返机票", "目的地推荐", "酒店筛选", "行程攻略"][index];
+    button.title = template;
+    button.addEventListener("click", () => {
+      queryInput.value = template;
+      updateQueryCount();
+      queryInput.focus();
+    });
+    promptChips.appendChild(button);
+  });
+}
+
+function updateQueryCount() {
+  const length = queryInput.value.length;
+  queryCount.textContent = `${length}/2000`;
+  queryCount.classList.toggle("warn", length > 500 && currentUser?.role !== "owner");
+}
+
 function compactTags(values) {
   const tags = values.filter(Boolean);
   if (!tags.length) return "";
@@ -522,6 +593,20 @@ function formatDate(value) {
   } catch {
     return value;
   }
+}
+
+function durationText(value) {
+  const ms = Number(value || 0);
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m${rest ? `${rest}s` : ""}`;
+}
+
+function statusText(value) {
+  return value === "success" ? "完成" : "异常";
 }
 
 function escapeHtml(value) {

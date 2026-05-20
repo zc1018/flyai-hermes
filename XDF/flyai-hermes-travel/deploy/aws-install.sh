@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ARCHIVE_URL="${1:-}"
-APP_NAME="flyai-hermes-travel"
-APP_DIR="/home/ec2-user/${APP_NAME}"
+APP_NAME="${APP_NAME:-flyai-hermes-travel}"
+SERVICE_NAME="${SERVICE_NAME:-${APP_NAME}}"
+APP_DIR="${APP_DIR:-/home/ec2-user/${APP_NAME}}"
 PORT="${PORT:-8787}"
 PUBLIC_PATH="${PUBLIC_PATH:-/flyai-travel/}"
+SERVER_NAME="${SERVER_NAME:-100zhang.top}"
+DATABASE_PATH="${DATABASE_PATH:-data/travel.db}"
 OWNER_PASSWORD="${OWNER_PASSWORD:-${APP_PASSWORD:-change-me}}"
 SESSION_SECRET="${SESSION_SECRET:-$(python3 - <<'PY'
 import secrets
@@ -32,12 +35,29 @@ unzip -q "${workdir}/${APP_NAME}.zip" -d "${workdir}/src"
 
 echo "Installing app files to ${APP_DIR}"
 mkdir -p "${APP_DIR}"
+source_root="${workdir}/src/${SOURCE_SUBDIR:-${APP_NAME}}"
+if [[ ! -d "${source_root}" ]]; then
+  source_root="$(find "${workdir}/src" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+fi
+if [[ -n "${source_root}" && -d "${source_root}" && ! -f "${source_root}/pyproject.toml" ]]; then
+  detected_source="$(find "${source_root}" -maxdepth 4 -type f -name pyproject.toml -path "*/flyai-hermes-travel/pyproject.toml" | head -n 1 || true)"
+  if [[ -z "${detected_source}" ]]; then
+    detected_source="$(find "${source_root}" -maxdepth 4 -type f -name pyproject.toml | head -n 1 || true)"
+  fi
+  if [[ -n "${detected_source}" ]]; then
+    source_root="$(dirname "${detected_source}")"
+  fi
+fi
+if [[ -z "${source_root}" || ! -d "${source_root}" || ! -f "${source_root}/pyproject.toml" ]]; then
+  echo "Could not locate extracted source directory" >&2
+  exit 2
+fi
 rsync -a --delete \
   --exclude ".venv" \
   --exclude "node_modules" \
   --exclude "data/*.db" \
   --exclude "data/*.db-*" \
-  "${workdir}/src/${APP_NAME}/" "${APP_DIR}/"
+  "${source_root}/" "${APP_DIR}/"
 
 cd "${APP_DIR}"
 python3 -m venv .venv
@@ -58,13 +78,13 @@ HERMES_MODEL=kimi-k2.6
 HERMES_INFERENCE_PROVIDER=kimi-coding
 HERMES_INFERENCE_MODEL=kimi-k2.6
 HERMES_TIMEOUT_SECONDS=900
-DATABASE_PATH=data/travel.db
+DATABASE_PATH=${DATABASE_PATH}
 EOF
 
 echo "Writing systemd service"
-sudo tee /etc/systemd/system/${APP_NAME}.service >/dev/null <<EOF
+sudo tee /etc/systemd/system/${SERVICE_NAME}.service >/dev/null <<EOF
 [Unit]
-Description=Hermes FlyAI Travel
+Description=Hermes FlyAI Travel (${SERVICE_NAME})
 After=network.target
 
 [Service]
@@ -82,27 +102,30 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ${APP_NAME}
-sudo systemctl restart ${APP_NAME}
+sudo systemctl enable --now ${SERVICE_NAME}
+sudo systemctl restart ${SERVICE_NAME}
 
-echo "Adding nginx location to existing 100zhang.top server block"
+echo "Adding nginx proxy for ${SERVER_NAME}${PUBLIC_PATH}"
 nginx_patch="${workdir}/patch_nginx.py"
 cat > "${nginx_patch}" <<'PY'
 from pathlib import Path
+import os
 import re
 import shutil
 
-app_name = "flyai-hermes-travel"
-port = "8787"
-marker = "# flyai-hermes-travel:start"
-location = f"""
-    {marker}
-    location = /flyai-travel {{
-        return 301 /flyai-travel/;
-    }}
+app_name = os.environ["NGINX_APP_NAME"]
+port = os.environ["NGINX_PORT"]
+server_name = os.environ["NGINX_SERVER_NAME"]
+public_path = os.environ["NGINX_PUBLIC_PATH"].strip() or "/"
+if not public_path.startswith("/"):
+    public_path = "/" + public_path
+if public_path != "/" and not public_path.endswith("/"):
+    public_path += "/"
 
-    location /flyai-travel/ {{
-        proxy_pass http://127.0.0.1:{port}/;
+marker = f"# {app_name}:start"
+end_marker = f"# {app_name}:end"
+
+proxy_headers = f"""
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -110,9 +133,28 @@ location = f"""
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
-        proxy_buffering off;
+        proxy_buffering off;"""
+
+if public_path == "/":
+    location = f"""
+    {marker}
+    location / {{
+        proxy_pass http://127.0.0.1:{port}/;{proxy_headers}
     }}
-    # flyai-hermes-travel:end
+    {end_marker}
+"""
+else:
+    redirect_path = public_path.rstrip("/")
+    location = f"""
+    {marker}
+    location = {redirect_path} {{
+        return 301 {public_path};
+    }}
+
+    location {public_path} {{
+        proxy_pass http://127.0.0.1:{port}/;{proxy_headers}
+    }}
+    {end_marker}
 """
 
 def server_blocks(text: str):
@@ -131,12 +173,17 @@ def server_blocks(text: str):
 changed = False
 for path in sorted(Path("/etc/nginx/conf.d").glob("*.conf")):
     text = path.read_text()
-    if marker in text:
+    if marker in text and end_marker in text:
+        shutil.copy2(path, f"{path}.bak.{app_name}")
+        pattern = re.compile(rf"\n?\s*{re.escape(marker)}.*?{re.escape(end_marker)}\n?", re.S)
+        text = pattern.sub("\n" + location + "\n", text)
+        path.write_text(text)
+        changed = True
         continue
     inserts = []
     for start, end in server_blocks(text):
         block = text[start : end + 1]
-        if "server_name" in block and "100zhang.top" in block:
+        if "server_name" in block and server_name in block:
             inserts.append(end)
     if not inserts:
         continue
@@ -147,16 +194,21 @@ for path in sorted(Path("/etc/nginx/conf.d").glob("*.conf")):
     changed = True
 
 if not changed:
-    fallback = Path("/etc/nginx/conf.d/flyai-hermes-travel.conf")
+    fallback = Path(f"/etc/nginx/conf.d/{app_name}.conf")
     fallback.write_text(f"""
 server {{
     listen 80;
-    server_name 100zhang.top;
+    server_name {server_name};
 {location}
 }}
 """)
 PY
-sudo python3 "${nginx_patch}"
+sudo env \
+  NGINX_APP_NAME="${SERVICE_NAME}" \
+  NGINX_PORT="${PORT}" \
+  NGINX_SERVER_NAME="${SERVER_NAME}" \
+  NGINX_PUBLIC_PATH="${PUBLIC_PATH}" \
+  python3 "${nginx_patch}"
 
 sudo nginx -t
 sudo systemctl reload nginx
@@ -164,4 +216,4 @@ sudo systemctl reload nginx
 echo "Local health check"
 curl -fsS "http://127.0.0.1:${PORT}/api/health"
 echo
-echo "Done: http://100zhang.top${PUBLIC_PATH}"
+echo "Done: http://${SERVER_NAME}${PUBLIC_PATH}"
