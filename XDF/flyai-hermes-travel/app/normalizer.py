@@ -16,6 +16,7 @@ ALLOWED_TYPES = {
     "comparison_table",
     "notice",
     "booking_link",
+    "xhs_post_card",
 }
 
 TYPE_ALIASES = {
@@ -41,6 +42,10 @@ TYPE_ALIASES = {
     "table": "comparison_table",
     "bookinglink": "booking_link",
     "booking-link": "booking_link",
+    "xhspostcard": "xhs_post_card",
+    "xhs-post-card": "xhs_post_card",
+    "xhs": "xhs_post_card",
+    "xiaohongshu": "xhs_post_card",
 }
 
 ROUTE_CITIES = [
@@ -92,6 +97,10 @@ STRUCTURAL_SOURCE_KEYS = {
     "image_url",
     "picUrl",
     "mainPic",
+    "postUrl",
+    "likedCount",
+    "collectedCount",
+    "commentCount",
 }
 
 
@@ -595,6 +604,7 @@ def _normalize_block(block: Dict[str, Any]) -> Dict[str, Any]:
 
     _alias(normalized, "bookingUrl", ["booking_url", "jumpUrl", "detailUrl", "url"])
     _alias(normalized, "imageUrl", ["image_url", "picUrl", "mainPic", "image"])
+    _alias(normalized, "postUrl", ["post_url", "noteUrl", "note_url", "shareUrl", "share_url"])
     _alias(normalized, "title", ["name"])
 
     for list_key in ("items", "segments", "columns", "rows"):
@@ -2274,11 +2284,26 @@ def _extract_short_lines(text: str) -> List[str]:
     lines = []
     for line in text.splitlines():
         clean = _clean_display_line(line)
-        if clean and not _is_runtime_notice(clean):
+        if clean and not _is_runtime_notice(clean) and not _is_structural_noise_line(clean):
             lines.append(clean)
         if len(lines) >= 8:
             break
     return lines
+
+
+def _is_structural_noise_line(clean: str) -> bool:
+    lowered = re.sub(r"\s+", "", clean).lower()
+    if lowered in {"flightcard", "hotelcard", "traincard", "poicard", "destinationcard", "guide_section"}:
+        return True
+    if re.fullmatch(r"[|:：\\/\-—–\s]+", clean):
+        return True
+    if re.match(r"^\|?\s*(航段|日期|航班号|航班|出发|到达|价格|票价|时长)\s*\|", clean):
+        return True
+    if re.match(r"^[{}\\[\\],]+$", clean):
+        return True
+    if re.match(r'^(type|title|price|number|segments|items)\s*[:：=]', clean, flags=re.IGNORECASE):
+        return True
+    return False
 
 
 def _empty_notice() -> Dict[str, Any]:

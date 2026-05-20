@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
     app_password: str
     owner_password: str
@@ -22,6 +22,14 @@ class Settings:
     hermes_timeout_seconds: int
     secure_cookies: bool
     database_path: Path
+    xhs_enabled: bool = False
+    mediacrawler_dir: Path = ROOT_DIR.parent / "MediaCrawler"
+    xhs_login_type: str = "cookie"
+    xhs_cookies: str = ""
+    xhs_cache_ttl_hours: int = 12
+    xhs_timeout_seconds: int = 45
+    xhs_max_results: int = 6
+    xhs_max_daily_per_user: int = 10
 
 
 def _int_env(name: str, default: int) -> int:
@@ -58,4 +66,12 @@ def load_settings() -> Settings:
         hermes_timeout_seconds=_int_env("HERMES_TIMEOUT_SECONDS", 900),
         secure_cookies=_bool_env("SECURE_COOKIES", False),
         database_path=database,
+        xhs_enabled=_bool_env("XHS_ENABLED", False),
+        mediacrawler_dir=Path(os.getenv("MEDIACRAWLER_DIR", str(ROOT_DIR.parent / "MediaCrawler"))).expanduser(),
+        xhs_login_type=os.getenv("XHS_LOGIN_TYPE", "cookie"),
+        xhs_cookies=os.getenv("XHS_COOKIES", ""),
+        xhs_cache_ttl_hours=_int_env("XHS_CACHE_TTL_HOURS", 12),
+        xhs_timeout_seconds=_int_env("XHS_TIMEOUT_SECONDS", 45),
+        xhs_max_results=_int_env("XHS_MAX_RESULTS", 6),
+        xhs_max_daily_per_user=_int_env("XHS_MAX_DAILY_PER_USER", 10),
     )

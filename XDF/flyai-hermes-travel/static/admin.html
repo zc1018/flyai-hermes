@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>访问后台 · 旅行查询助手</title>
-    <link rel="stylesheet" href="assets/styles.css?v=20260519-10" />
+    <link rel="stylesheet" href="assets/styles.css?v=20260520-6" />
   </head>
   <body>
     <main class="shell">
@@ -55,6 +55,28 @@
             <div class="meta-grid" id="runtimeStats"></div>
           </div>
         </article>
+
+        <article class="card xhs-config-card">
+          <div class="card-body">
+            <div class="card-title">
+              <h3>小红书补充</h3>
+            </div>
+            <p class="small" id="xhsCookieState">正在读取配置</p>
+            <form id="xhsConfigForm" class="admin-form">
+              <label class="check-row"><input name="enabled" type="checkbox" /> 开启旅行灵感卡片</label>
+              <textarea name="cookies" rows="4" autocomplete="off" spellcheck="false" placeholder="可粘贴 web_session=...，也可直接粘贴浏览器导出的 Cookie 表格；留空表示不修改"></textarea>
+              <div class="compact-grid">
+                <label>超时秒数 <input name="timeout_seconds" type="number" min="10" max="180" value="45" /></label>
+                <label>结果数量 <input name="max_results" type="number" min="1" max="12" value="6" /></label>
+                <label>每日次数 <input name="max_daily_per_user" type="number" min="0" max="100" value="10" /></label>
+              </div>
+              <div class="form-actions">
+                <button type="submit">保存配置</button>
+                <button class="ghost-button" id="clearXhsCookieButton" type="button">清除 cookie</button>
+              </div>
+            </form>
+          </div>
+        </article>
       </section>
 
       <section class="card admin-only">
@@ -67,6 +89,6 @@
       </section>
     </main>
 
-    <script src="assets/admin.js?v=20260519-10"></script>
+    <script src="assets/admin.js?v=20260520-6"></script>
   </body>
 </html>

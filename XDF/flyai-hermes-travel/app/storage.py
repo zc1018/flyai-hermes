@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE TABLE IF NOT EXISTS queries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
+    conversation_id INTEGER,
     query TEXT NOT NULL,
     status TEXT NOT NULL,
     blocks_json TEXT NOT NULL,
@@ -39,6 +40,29 @@ CREATE TABLE IF NOT EXISTS queries (
 );
 CREATE INDEX IF NOT EXISTS idx_queries_created_at ON queries(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    profile_json TEXT NOT NULL DEFAULT '{}',
+    last_query_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_updated_at ON conversations(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation_created_at ON conversation_messages(conversation_id, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS usage_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -47,6 +71,17 @@ CREATE TABLE IF NOT EXISTS usage_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_events_user_created_at ON usage_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_events_type_created_at ON usage_events(event_type, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS xhs_cache (
+    cache_key TEXT PRIMARY KEY,
+    keyword TEXT NOT NULL,
+    blocks_json TEXT NOT NULL,
+    source_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_xhs_cache_updated_at ON xhs_cache(updated_at DESC);
 """
 
 
@@ -67,7 +102,9 @@ class QueryStore:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             self._ensure_column(conn, "queries", "user_id", "INTEGER")
+            self._ensure_column(conn, "queries", "conversation_id", "INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_queries_user_created_at ON queries(user_id, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_queries_conversation_created_at ON queries(conversation_id, created_at DESC)")
             if owner_password:
                 self.ensure_owner(owner_password, conn=conn)
             conn.commit()
@@ -261,6 +298,7 @@ class QueryStore:
         stderr: str,
         duration_ms: int,
         user_id: Optional[int] = None,
+        conversation_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         created_at = _utc_now()
         blocks_json = json.dumps(blocks, ensure_ascii=False)
@@ -268,10 +306,10 @@ class QueryStore:
             cursor = conn.execute(
                 """
                 INSERT INTO queries
-                    (user_id, query, status, blocks_json, raw_output, stderr, duration_ms, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (user_id, conversation_id, query, status, blocks_json, raw_output, stderr, duration_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, query, status, blocks_json, raw_output, stderr, duration_ms, created_at),
+                (user_id, conversation_id, query, status, blocks_json, raw_output, stderr, duration_ms, created_at),
             )
             query_id = int(cursor.lastrowid)
             conn.commit()
@@ -279,6 +317,7 @@ class QueryStore:
         return {
             "id": query_id,
             "user_id": user_id,
+            "conversation_id": conversation_id,
             "query": query,
             "status": status,
             "blocks": blocks,
@@ -287,6 +326,22 @@ class QueryStore:
             "duration_ms": duration_ms,
             "created_at": created_at,
         }
+
+    def append_blocks(self, query_id: int, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not blocks:
+            return []
+        with self._connect() as conn:
+            row = conn.execute("SELECT blocks_json FROM queries WHERE id = ?", (int(query_id),)).fetchone()
+            if not row:
+                return []
+            existing = json.loads(row["blocks_json"])
+            merged = existing + blocks
+            conn.execute(
+                "UPDATE queries SET blocks_json = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=False), int(query_id)),
+            )
+            conn.commit()
+        return merged
 
     def list_recent(self, user_id: Optional[int] = None, limit: int = 30, include_all: bool = False) -> List[Dict[str, Any]]:
         params: List[Any] = []
@@ -326,6 +381,165 @@ class QueryStore:
             )
         return items
 
+    def create_conversation(
+        self,
+        user_id: int,
+        title: str = "新的旅行计划",
+        profile: Optional[Dict[str, Any]] = None,
+        status: str = "draft",
+    ) -> Dict[str, Any]:
+        now = _utc_now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO conversations (user_id, title, status, profile_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(user_id),
+                    title.strip() or "新的旅行计划",
+                    status,
+                    json.dumps(profile or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            conversation_id = int(cursor.lastrowid)
+            conn.commit()
+        return self.get_conversation(conversation_id, user_id=user_id) or {}
+
+    def list_conversations(
+        self,
+        user_id: Optional[int] = None,
+        limit: int = 30,
+        include_all: bool = False,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = []
+        where = ""
+        if not include_all:
+            where = "WHERE conversations.user_id = ?"
+            params.append(int(user_id or 0))
+        params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT conversations.*, users.label AS user_label
+                FROM conversations
+                LEFT JOIN users ON users.id = conversations.user_id
+                {where}
+                ORDER BY conversations.updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._conversation_from_row(dict(row), messages=[]) for row in rows]
+
+    def get_conversation(
+        self,
+        conversation_id: int,
+        user_id: Optional[int] = None,
+        include_all: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        params: List[Any] = [int(conversation_id)]
+        where = "WHERE conversations.id = ?"
+        if not include_all:
+            where += " AND conversations.user_id = ?"
+            params.append(int(user_id or 0))
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT conversations.*, users.label AS user_label
+                FROM conversations
+                LEFT JOIN users ON users.id = conversations.user_id
+                {where}
+                """,
+                params,
+            ).fetchone()
+            if not row:
+                return None
+            messages = conn.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (int(conversation_id),),
+            ).fetchall()
+        return self._conversation_from_row(dict(row), [self._message_from_row(dict(message)) for message in messages])
+
+    def update_conversation(
+        self,
+        conversation_id: int,
+        updates: Dict[str, Any],
+        user_id: Optional[int] = None,
+        include_all: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {"title", "status", "profile", "last_query_id"}
+        assignments = []
+        values: List[Any] = []
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            column = "profile_json" if key == "profile" else key
+            assignments.append(f"{column} = ?")
+            if key == "profile":
+                values.append(json.dumps(value or {}, ensure_ascii=False))
+            elif key == "last_query_id":
+                values.append(None if value is None else int(value))
+            else:
+                values.append(str(value).strip())
+        if not assignments:
+            return self.get_conversation(conversation_id, user_id=user_id, include_all=include_all)
+        assignments.append("updated_at = ?")
+        values.append(_utc_now())
+        values.append(int(conversation_id))
+        where = "id = ?"
+        if not include_all:
+            where += " AND user_id = ?"
+            values.append(int(user_id or 0))
+        with self._connect() as conn:
+            conn.execute(f"UPDATE conversations SET {', '.join(assignments)} WHERE {where}", values)
+            conn.commit()
+        return self.get_conversation(conversation_id, user_id=user_id, include_all=include_all)
+
+    def add_conversation_message(
+        self,
+        conversation_id: int,
+        role: str,
+        message_type: str,
+        content: str,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        created_at = _utc_now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO conversation_messages
+                    (conversation_id, role, message_type, content, data_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(conversation_id),
+                    role,
+                    message_type,
+                    content,
+                    json.dumps(data or {}, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            message_id = int(cursor.lastrowid)
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (created_at, int(conversation_id)))
+            conn.commit()
+        return {
+            "id": message_id,
+            "conversation_id": int(conversation_id),
+            "role": role,
+            "message_type": message_type,
+            "content": content,
+            "data": data or {},
+            "created_at": created_at,
+        }
+
     def log_usage_event(self, user_id: Optional[int], event_type: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -336,6 +550,81 @@ class QueryStore:
                 (user_id, event_type, json.dumps(metadata or {}, ensure_ascii=False), _utc_now()),
             )
             conn.commit()
+
+    def count_usage_events_today(self, user_id: Optional[int], event_type: str) -> int:
+        with self._connect() as conn:
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM usage_events WHERE event_type = ? AND substr(created_at, 1, 10) = ?",
+                    (event_type, _today_prefix()),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM usage_events
+                    WHERE user_id = ? AND event_type = ? AND substr(created_at, 1, 10) = ?
+                    """,
+                    (int(user_id), event_type, _today_prefix()),
+                ).fetchone()
+        return int(row["count"] if row else 0)
+
+    def get_xhs_cache(self, cache_key: str, max_age_seconds: int) -> Optional[List[Dict[str, Any]]]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT blocks_json, updated_at FROM xhs_cache WHERE cache_key = ?", (cache_key,)).fetchone()
+        if not row:
+            return None
+        try:
+            updated_at = datetime.fromisoformat(row["updated_at"])
+        except ValueError:
+            return None
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - updated_at > timedelta(seconds=max_age_seconds):
+            return None
+        try:
+            blocks = json.loads(row["blocks_json"])
+        except json.JSONDecodeError:
+            return None
+        return blocks if isinstance(blocks, list) else None
+
+    def upsert_xhs_cache(
+        self,
+        cache_key: str,
+        keyword: str,
+        blocks: List[Dict[str, Any]],
+        source: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO xhs_cache (cache_key, keyword, blocks_json, source_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    keyword = excluded.keyword,
+                    blocks_json = excluded.blocks_json,
+                    source_json = excluded.source_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cache_key,
+                    keyword,
+                    json.dumps(blocks, ensure_ascii=False),
+                    json.dumps(source or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def xhs_cache_stats(self) -> Dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count, MAX(updated_at) AS latest FROM xhs_cache").fetchone()
+        return {
+            "entries": int(row["count"] if row else 0),
+            "latest_updated_at": row["latest"] if row else None,
+        }
 
     def check(self) -> Dict[str, Any]:
         try:
@@ -353,3 +642,42 @@ class QueryStore:
                 row[key] = bool(row[key])
         row["used_today"] = int(row.get("used_today") or 0)
         return row
+
+    def _conversation_from_row(self, row: Dict[str, Any], messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        profile: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(row.get("profile_json") or "{}")
+            if isinstance(parsed, dict):
+                profile = parsed
+        except json.JSONDecodeError:
+            profile = {}
+        return {
+            "id": int(row["id"]),
+            "user_id": int(row["user_id"]),
+            "user_label": row.get("user_label"),
+            "title": row.get("title") or "新的旅行计划",
+            "status": row.get("status") or "draft",
+            "profile": profile,
+            "last_query_id": row.get("last_query_id"),
+            "messages": messages,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _message_from_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        data: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(row.get("data_json") or "{}")
+            if isinstance(parsed, dict):
+                data = parsed
+        except json.JSONDecodeError:
+            data = {}
+        return {
+            "id": int(row["id"]),
+            "conversation_id": int(row["conversation_id"]),
+            "role": row["role"],
+            "message_type": row["message_type"],
+            "content": row["content"],
+            "data": data,
+            "created_at": row["created_at"],
+        }

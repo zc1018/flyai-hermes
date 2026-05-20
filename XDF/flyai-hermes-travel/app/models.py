@@ -13,6 +13,18 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=2, max_length=2000)
 
 
+class ConversationCreateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=120)
+
+
+class ConversationMessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class ConversationSearchRequest(BaseModel):
+    query: Optional[str] = Field(default=None, min_length=2, max_length=2000)
+
+
 class QueryResponse(BaseModel):
     id: int
     user_id: Optional[int] = None
@@ -34,6 +46,29 @@ class HistoryItem(BaseModel):
     blocks: List[Dict[str, Any]]
     duration_ms: int
     created_at: str
+
+
+class ConversationMessageResponse(BaseModel):
+    id: int
+    conversation_id: int
+    role: str
+    message_type: str
+    content: str
+    data: Dict[str, Any]
+    created_at: str
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    user_id: int
+    user_label: Optional[str] = None
+    title: str
+    status: str
+    profile: Dict[str, Any]
+    last_query_id: Optional[int] = None
+    messages: List[ConversationMessageResponse] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
 
 
 class HealthResponse(BaseModel):
@@ -87,3 +122,12 @@ class UpdateUserRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     password: str = Field(min_length=6, max_length=200)
+
+
+class XhsConfigRequest(BaseModel):
+    enabled: bool
+    cookies: Optional[str] = Field(default=None, max_length=30000)
+    clear_cookies: bool = False
+    timeout_seconds: int = Field(default=45, ge=10, le=180)
+    max_results: int = Field(default=6, ge=1, le=12)
+    max_daily_per_user: int = Field(default=10, ge=0, le=100)

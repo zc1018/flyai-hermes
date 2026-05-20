@@ -6,6 +6,9 @@ const adminLogoutButton = document.querySelector("#adminLogoutButton");
 const accessNotice = document.querySelector("#accessNotice");
 const accessNoticeText = document.querySelector("#accessNoticeText");
 const adminOnlySections = document.querySelectorAll(".admin-only");
+const xhsConfigForm = document.querySelector("#xhsConfigForm");
+const xhsCookieState = document.querySelector("#xhsCookieState");
+const clearXhsCookieButton = document.querySelector("#clearXhsCookieButton");
 
 async function request(path, options = {}) {
   const response = await fetch(path.replace(/^\//, ""), {
@@ -47,18 +50,41 @@ function showAccessNotice(message) {
 }
 
 async function loadAdmin() {
-  const usage = await request("/api/admin/usage");
+  const [usage, xhsConfig] = await Promise.all([request("/api/admin/usage"), request("/api/admin/xhs-config")]);
   const runtime = usage.runtime || {};
+  const xhs = usage.xhs || {};
+  const xhsCache = xhs.cache || {};
   runtimeStats.innerHTML = [
     tag(`全站并发 ${runtime.active || 0}/${runtime.global_concurrency || 0}`),
     tag(`排队 ${runtime.queued || 0}`),
+    tag(`小红书 ${xhs.enabled ? "已开启" : "未开启"}`),
+    tag(`小红书运行 ${xhs.running || 0}`),
+    tag(`小红书排队 ${xhs.queued || 0}`),
+    tag(`今日小红书 ${xhs.today_calls || 0}`),
+    tag(`缓存 ${xhsCache.entries || 0}`),
   ].join("");
+  renderXhsConfig(xhsConfig);
   renderUsers(usage.users || []);
   adminStatus.textContent = "后台可用";
   adminStatus.classList.add("ok");
   adminStatus.classList.remove("warn");
   accessNotice.classList.add("is-hidden");
   adminOnlySections.forEach((section) => section.classList.remove("is-hidden"));
+}
+
+function renderXhsConfig(config) {
+  if (!xhsConfigForm) return;
+  xhsConfigForm.enabled.checked = Boolean(config.enabled);
+  xhsConfigForm.timeout_seconds.value = config.timeout_seconds || 45;
+  xhsConfigForm.max_results.value = config.max_results || 6;
+  xhsConfigForm.max_daily_per_user.value = config.max_daily_per_user ?? 10;
+  xhsConfigForm.cookies.value = "";
+  const readyText = config.mediacrawler_ready ? "MediaCrawler 已就绪" : "MediaCrawler 未就绪";
+  let cookieText = config.cookie_configured ? "cookie 已配置" : "cookie 未配置";
+  if (config.cookie_configured && config.required_cookie_ok === false) {
+    cookieText = `cookie 缺少 ${config.required_cookie_name || "必需字段"}`;
+  }
+  xhsCookieState.textContent = `${readyText} · ${cookieText} · ${config.enabled ? "已开启" : "未开启"}`;
 }
 
 function renderUsers(users) {
@@ -112,6 +138,49 @@ createUserForm.addEventListener("submit", async (event) => {
     createUserForm.daily_limit.value = "10";
     createUserForm.timeout_seconds.value = "300";
     createUserForm.can_view_history.checked = true;
+    await loadAdmin();
+  } catch (error) {
+    adminStatus.textContent = error.message;
+    adminStatus.classList.add("warn");
+  }
+});
+
+xhsConfigForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = new FormData(xhsConfigForm);
+  try {
+    const config = await request("/api/admin/xhs-config", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: Boolean(form.get("enabled")),
+        cookies: String(form.get("cookies") || "").trim() || null,
+        timeout_seconds: Number(form.get("timeout_seconds") || 45),
+        max_results: Number(form.get("max_results") || 6),
+        max_daily_per_user: Number(form.get("max_daily_per_user") || 10),
+      }),
+    });
+    renderXhsConfig(config);
+    await loadAdmin();
+  } catch (error) {
+    adminStatus.textContent = error.message;
+    adminStatus.classList.add("warn");
+  }
+});
+
+clearXhsCookieButton?.addEventListener("click", async () => {
+  if (!confirm("确定清除小红书 cookie 并关闭小红书补充吗？")) return;
+  try {
+    const config = await request("/api/admin/xhs-config", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: false,
+        clear_cookies: true,
+        timeout_seconds: Number(xhsConfigForm.timeout_seconds.value || 45),
+        max_results: Number(xhsConfigForm.max_results.value || 6),
+        max_daily_per_user: Number(xhsConfigForm.max_daily_per_user.value || 10),
+      }),
+    });
+    renderXhsConfig(config);
     await loadAdmin();
   } catch (error) {
     adminStatus.textContent = error.message;

@@ -9,6 +9,7 @@
 - 自然语言查询旅行信息：机票、火车、酒店、景点、目的地推荐和行程攻略。
 - Hermes 流式执行：前端可以看到实时进度，服务端不再走 direct-flyai 降级路径。
 - 卡片化渲染：后端 normalizer 会把 fly.ai/Hermes 的 JSON 或 Markdown 输出转换成结构化卡片。
+- 小红书灵感补充：可选接入 MediaCrawler，在主查询完成后补充高互动小红书笔记卡片，包含缩略图、标题、摘要、赞藏评和直达链接。
 - 往返机票保护：如果用户问的是往返机票，后端会校验卡片是否包含去程和返程；能从原文补齐时自动修复，不能补齐时显示明确提示。
 - 多口令访问控制：owner 不限每日次数，朋友口令可单独配置启用状态、每日额度、并发数、超时时间和历史权限。
 - 历史隔离：普通用户只看自己的历史；owner 后台可查看全局最近查询和运行状态。
@@ -54,6 +55,14 @@ OWNER_PASSWORD=change-me uvicorn app.main:app --host 0.0.0.0 --port 8787
 | `HERMES_MODEL` | `kimi-k2.6` | Hermes model |
 | `HERMES_TIMEOUT_SECONDS` | `900` | 服务端硬超时上限 |
 | `DATABASE_PATH` | `data/travel.db` | SQLite 数据库路径 |
+| `XHS_ENABLED` | `false` | 是否开启小红书灵感补充 |
+| `MEDIACRAWLER_DIR` | 项目上级目录的 `MediaCrawler` | MediaCrawler 安装目录 |
+| `XHS_LOGIN_TYPE` | `cookie` | MediaCrawler 登录方式，建议生产使用 cookie |
+| `XHS_COOKIES` | 空 | 小红书 cookie，只有 `XHS_ENABLED=true` 时使用 |
+| `XHS_CACHE_TTL_HOURS` | `12` | 小红书结果缓存时间 |
+| `XHS_TIMEOUT_SECONDS` | `45` | 单次小红书补充查询超时 |
+| `XHS_MAX_RESULTS` | `6` | 每次展示的小红书笔记数量 |
+| `XHS_MAX_DAILY_PER_USER` | `10` | 普通用户每日小红书实时补充次数，缓存命中不计入 |
 
 `.env.example` 是本地开发模板。生产环境至少应显式配置 `OWNER_PASSWORD`、`SESSION_SECRET`、`HERMES_BIN`、`HERMES_HOME`、`SECURE_COOKIES=true`。
 
@@ -77,6 +86,31 @@ OWNER_PASSWORD=change-me uvicorn app.main:app --host 0.0.0.0 --port 8787
 - 普通用户单次超时：最多 `300s`
 - owner 每日不限次数，但仍受 `HERMES_TIMEOUT_SECONDS` 保护
 - 普通用户查询文本超过 `500` 字会被拒绝，避免过度消耗
+- 小红书补充默认全站并发 `1`，超时或不可用时只显示轻提示，不影响 fly.ai 主查询
+
+## 小红书 / MediaCrawler 接入
+
+小红书补充功能默认关闭。开启前需要在服务器上单独安装 [NanmiCoder/MediaCrawler](https://github.com/NanmiCoder/MediaCrawler)，并按该项目说明完成依赖和登录态配置。MediaCrawler 官方说明它支持小红书关键词搜索，并使用 Playwright/Chrome 登录态获取公开内容；也明确要求控制频率、避免大规模或不合规使用。
+
+线上版本可由 owner 在 `/admin` 的“小红书补充”卡片里配置 cookie、开关、超时、结果数量和普通用户每日次数；后台只显示“已配置/未配置”，不会回显 cookie。可以直接粘贴 `web_session=...`，也可以粘贴浏览器导出的 Cookie 表格，服务端会自动抽取 `name/value`。MediaCrawler 的小红书 cookie 登录必须包含 `web_session`。也可以直接编辑 `.env`：
+
+```bash
+XHS_ENABLED=true
+MEDIACRAWLER_DIR=/home/ec2-user/MediaCrawler
+XHS_LOGIN_TYPE=cookie
+XHS_COOKIES='your-xhs-cookie'
+XHS_CACHE_TTL_HOURS=12
+XHS_TIMEOUT_SECONDS=45
+XHS_MAX_RESULTS=6
+XHS_MAX_DAILY_PER_USER=10
+```
+
+运行方式：
+
+- 主查询仍由 Hermes/fly.ai 执行，小红书只做“社区灵感补充”。
+- 若小红书结果先返回，会合并进最终结果；若主查询先完成，前端会通过 `supplement` 流式事件追加小红书卡片。
+- 缓存命中会直接展示，不再启动 MediaCrawler。
+- 缺少 cookie、MediaCrawler 目录不存在、超时或被限流时，不会阻塞主查询。
 
 ## API 概览
 
@@ -85,6 +119,11 @@ OWNER_PASSWORD=change-me uvicorn app.main:app --host 0.0.0.0 --port 8787
 - `POST /api/login`：输入访问口令登录
 - `POST /api/logout`：退出登录
 - `GET /api/me`：当前用户和额度
+- `POST /api/conversations`：创建多轮旅行会话
+- `GET /api/conversations`：旅行会话列表，普通用户按用户隔离
+- `GET /api/conversations/{conversation_id}`：读取单个会话、消息和旅行条件
+- `POST /api/conversations/{conversation_id}/messages/stream`：发送自然语言消息，返回追问或查询确认卡片；不会消耗 fly.ai 查询额度
+- `POST /api/conversations/{conversation_id}/search/stream`：用户确认后执行实时查询，复用 Hermes/fly.ai、小红书补充、队列和配额
 - `POST /api/query/stream`：流式旅行查询
 - `GET /api/history`：查询历史，普通用户按用户隔离
 - `GET /api/health`：公共健康检查，只返回是否可用
@@ -116,6 +155,7 @@ owner 后台接口：
 - `comparison_table`
 - `notice`
 - `booking_link`
+- `xhs_post_card`
 
 Hermes 偶尔会输出 `flightcard`、`flight-card` 这类别名，normalizer 会兼容并转成标准类型。价格、航班号、列车班次号、酒店名等核心信息会尽量保留；如果 fly.ai 没返回价格，会显示“未返回票价”，而不是静默丢失。
 
@@ -209,6 +249,7 @@ node --check static/admin.js
 - 普通用户登录、禁用、额度和并发限制
 - 普通用户历史隔离和后台权限拒绝
 - Hermes 流式查询不走 direct-flyai fallback
+- 小红书补充结果追加、缓存和历史保存
 - 公共健康检查不泄露部署细节
 - 航班/酒店/景点/火车/目的地卡片渲染
 - 往返机票缺返程时的自动修复和提示

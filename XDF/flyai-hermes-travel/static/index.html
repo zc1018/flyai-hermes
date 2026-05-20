@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>FlyAI Travel 旅行查询助手</title>
     <meta name="theme-color" content="#eaf5f8" />
-    <link rel="stylesheet" href="assets/styles.css?v=20260520-3" />
+    <link rel="stylesheet" href="assets/styles.css?v=20260520-6" />
   </head>
   <body>
     <main class="shell">
@@ -67,9 +67,9 @@
           <form id="queryForm" class="query-box" aria-label="旅行查询">
             <div class="query-head">
               <div>
-                <p class="section-label">新查询</p>
+                <p class="section-label">旅行对话</p>
                 <h2>今天想安排哪段旅程？</h2>
-                <p class="query-subtitle">写成一句自然语言就可以，越具体越容易拿到可用结果。</p>
+                <p class="query-subtitle">可以先说一个模糊想法，我会追问缺失信息，确认后再查实时数据。</p>
               </div>
               <span class="quota-pill" id="quotaStatus"></span>
             </div>
@@ -96,14 +96,14 @@
               id="queryInput"
               maxlength="2000"
               aria-describedby="queryHint travelBrief"
-              placeholder="例如：2026 年端午节前后，北京东京往返机票，停留 5 晚，上午北京出发，下午或晚上东京返回，不转机，给我最低价方案，要航班号和价格。"
+              placeholder="例如：暑假夫妻两个人想出国玩 7 天，希望安全、直飞、价格别比平时贵太多。"
             ></textarea>
             <div class="query-actions">
-              <span id="queryHint">会查询实时旅行信息，并整理成可读卡片</span>
+              <span id="queryHint">先整理需求，确认后才会消耗一次实时查询额度</span>
               <span id="queryCount" class="small">0/2000</span>
               <button class="ghost-button" type="button" id="clearQueryButton">清空</button>
               <button class="ghost-button cancel-button is-hidden" type="button" id="cancelQueryButton">停止等待</button>
-              <button type="submit" id="queryButton">查询</button>
+              <button type="submit" id="queryButton">发送</button>
             </div>
           </form>
 
@@ -129,6 +129,6 @@
       </section>
     </main>
 
-    <script src="assets/app.js?v=20260520-3"></script>
+    <script src="assets/app.js?v=20260520-6"></script>
   </body>
 </html>

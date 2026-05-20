@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 import json
+import os
 import shutil
 from pathlib import Path
 import threading
@@ -14,8 +16,13 @@ from starlette.concurrency import run_in_threadpool
 
 from .auth import COOKIE_NAME, create_session_token, verify_session_token
 from .config import ROOT_DIR, Settings, load_settings
+from .conversation import build_conversation_turn, conversation_title
 from .hermes import HermesClient, HermesResult, HermesStreamEvent, runtime_env
 from .models import (
+    ConversationCreateRequest,
+    ConversationMessageRequest,
+    ConversationResponse,
+    ConversationSearchRequest,
     CreateUserRequest,
     HealthResponse,
     HistoryItem,
@@ -26,14 +33,18 @@ from .models import (
     ResetPasswordRequest,
     UpdateUserRequest,
     UserResponse,
+    XhsConfigRequest,
 )
 from .normalizer import error_blocks, normalize_output
 from .storage import QueryStore
+from .xhs import XhsClient, XhsSearchResult, normalize_xhs_cookie_input, xhs_cookie_has_required_session
 
 
 settings = load_settings()
 store = QueryStore(settings.database_path)
 hermes_client = HermesClient(settings)
+xhs_client = XhsClient(settings, store)
+ENV_FILE = Path(os.getenv("APP_ENV_FILE", ROOT_DIR / ".env"))
 
 
 @asynccontextmanager
@@ -205,9 +216,58 @@ def _health_details() -> Dict[str, Any]:
         "flyai_cli": {"ok": bool(flyai_path), "path": flyai_path},
         "database": db_status,
         "app_password_configured": bool(settings.owner_password or settings.app_password),
+        "xhs": xhs_client.health(),
         "runtime_mode": runtime_mode,
         "message": message,
     }
+
+
+def _xhs_config_payload() -> Dict[str, Any]:
+    health = xhs_client.health()
+    return {
+        "enabled": settings.xhs_enabled,
+        "cookie_configured": bool(settings.xhs_cookies),
+        "required_cookie_ok": bool(health.get("required_cookie_ok", True)),
+        "required_cookie_name": health.get("required_cookie_name"),
+        "timeout_seconds": settings.xhs_timeout_seconds,
+        "max_results": settings.xhs_max_results,
+        "max_daily_per_user": settings.xhs_max_daily_per_user,
+        "cache_ttl_hours": settings.xhs_cache_ttl_hours,
+        "mediacrawler_ready": bool(health.get("mediacrawler_dir_ok") and health.get("uv_ok") and health.get("required_cookie_ok", True)),
+        "health": health,
+    }
+
+
+def _write_env_updates(updates: Dict[str, str]) -> None:
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
+    seen: set[str] = set()
+    output: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            output.append(line)
+            continue
+        key, _ = line.split("=", 1)
+        key = key.strip()
+        if key in updates:
+            output.append(f"{key}={_format_env_value(updates[key])}")
+            seen.add(key)
+        else:
+            output.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={_format_env_value(value)}")
+    ENV_FILE.write_text("\n".join(output).rstrip() + "\n")
+
+
+def _format_env_value(value: str) -> str:
+    if value == "":
+        return ""
+    if any(char.isspace() for char in value) or any(char in value for char in ['"', "\\", "$", "`", "#", ";"]):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+        return f'"{escaped}"'
+    return value
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -244,6 +304,70 @@ def history(user: Dict[str, Any] = Depends(require_auth)) -> List[Dict[str, Any]
     if not user.get("can_view_history"):
         return []
     return _history_items(store.list_recent(user_id=int(user["id"])))
+
+
+@app.post("/api/conversations", response_model=ConversationResponse)
+def create_conversation(payload: ConversationCreateRequest, user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
+    title = payload.title or "新的旅行计划"
+    return store.create_conversation(int(user["id"]), title=title)
+
+
+@app.get("/api/conversations", response_model=List[ConversationResponse])
+def conversations(user: Dict[str, Any] = Depends(require_auth)) -> List[Dict[str, Any]]:
+    if user.get("role") == "owner":
+        return store.list_conversations(include_all=True)
+    if not user.get("can_view_history"):
+        return []
+    return store.list_conversations(user_id=int(user["id"]))
+
+
+@app.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
+def conversation_detail(conversation_id: int, user: Dict[str, Any] = Depends(require_auth)) -> Dict[str, Any]:
+    return _require_conversation(conversation_id, user)
+
+
+@app.post("/api/conversations/{conversation_id}/messages/stream")
+def conversation_message_stream(
+    conversation_id: int,
+    payload: ConversationMessageRequest,
+    request: Request,
+    user: Dict[str, Any] = Depends(require_auth),
+) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_conversation_message_events(conversation_id, payload.message, request, user),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/conversations/{conversation_id}/search/stream")
+def conversation_search_stream(
+    conversation_id: int,
+    payload: ConversationSearchRequest,
+    request: Request,
+    user: Dict[str, Any] = Depends(require_auth),
+) -> StreamingResponse:
+    conversation = _require_conversation(conversation_id, user)
+    if conversation.get("status") == "running":
+        raise HTTPException(status_code=409, detail="这个旅行会话正在查询中，请等待当前结果返回。")
+    query_text = (payload.query or conversation.get("profile", {}).get("search_query") or "").strip()
+    if not query_text:
+        raise HTTPException(status_code=400, detail="还没有可执行的查询条件。请先补充旅行需求。")
+    _preflight_query(query_text, user)
+    store.update_conversation(conversation_id, {"status": "running"}, user_id=int(user["id"]), include_all=user.get("role") == "owner")
+    return StreamingResponse(
+        _stream_query_events(query_text, request, user, conversation_id=conversation_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/admin/users", response_model=List[UserResponse])
@@ -291,6 +415,7 @@ def admin_reset_password(user_id: int, payload: ResetPasswordRequest, _: Dict[st
 def admin_usage(_: Dict[str, Any] = Depends(require_owner)) -> Dict[str, Any]:
     return {
         "runtime": query_runtime.stats(),
+        "xhs": xhs_client.stats(),
         "users": store.list_users(),
         "recent": store.list_recent(include_all=True, limit=20),
     }
@@ -301,7 +426,106 @@ def admin_health(_: Dict[str, Any] = Depends(require_owner)) -> Dict[str, Any]:
     return _health_details()
 
 
-async def _stream_query_events(query_text: str, request: Request, user: Dict[str, Any]) -> AsyncIterator[str]:
+@app.get("/api/admin/xhs-config")
+def admin_xhs_config(_: Dict[str, Any] = Depends(require_owner)) -> Dict[str, Any]:
+    return _xhs_config_payload()
+
+
+@app.post("/api/admin/xhs-config")
+def admin_update_xhs_config(payload: XhsConfigRequest, _: Dict[str, Any] = Depends(require_owner)) -> Dict[str, Any]:
+    cookies = settings.xhs_cookies
+    if payload.clear_cookies:
+        cookies = ""
+    elif payload.cookies is not None and payload.cookies.strip():
+        cookies = normalize_xhs_cookie_input(payload.cookies)
+
+    if payload.enabled and not cookies:
+        raise HTTPException(status_code=400, detail="请先粘贴小红书 cookie，再开启小红书补充。")
+    if payload.enabled and settings.xhs_login_type == "cookie" and not xhs_cookie_has_required_session(cookies):
+        raise HTTPException(status_code=400, detail="这份小红书 cookie 缺少 web_session，MediaCrawler 无法识别登录态。请从 www.xiaohongshu.com 的 Cookie 里复制 web_session 后再开启。")
+
+    settings.xhs_enabled = payload.enabled
+    settings.xhs_cookies = cookies
+    settings.xhs_timeout_seconds = payload.timeout_seconds
+    settings.xhs_max_results = payload.max_results
+    settings.xhs_max_daily_per_user = payload.max_daily_per_user
+
+    _write_env_updates(
+        {
+            "XHS_ENABLED": "true" if settings.xhs_enabled else "false",
+            "MEDIACRAWLER_DIR": str(settings.mediacrawler_dir),
+            "XHS_LOGIN_TYPE": settings.xhs_login_type,
+            "XHS_COOKIES": settings.xhs_cookies,
+            "XHS_TIMEOUT_SECONDS": str(settings.xhs_timeout_seconds),
+            "XHS_MAX_RESULTS": str(settings.xhs_max_results),
+            "XHS_MAX_DAILY_PER_USER": str(settings.xhs_max_daily_per_user),
+            "XHS_CACHE_TTL_HOURS": str(settings.xhs_cache_ttl_hours),
+        }
+    )
+    return _xhs_config_payload()
+
+
+def _require_conversation(conversation_id: int, user: Dict[str, Any]) -> Dict[str, Any]:
+    include_all = user.get("role") == "owner"
+    conversation = store.get_conversation(conversation_id, user_id=int(user["id"]), include_all=include_all)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="这个旅行会话不存在，或你没有访问权限。")
+    return conversation
+
+
+async def _stream_conversation_message_events(
+    conversation_id: int,
+    message: str,
+    request: Request,
+    user: Dict[str, Any],
+) -> AsyncIterator[str]:
+    conversation = _require_conversation(conversation_id, user)
+    clean = message.strip()
+    store.add_conversation_message(conversation_id, "user", "user_text", clean)
+    if await request.is_disconnected():
+        return
+
+    turn = build_conversation_turn(conversation.get("profile") or {}, clean)
+    profile = turn["profile"]
+    title = conversation_title(profile, conversation.get("title") or "新的旅行计划")
+    status = "ready" if turn["action"] in {"confirm", "search_requested"} else "draft"
+    updated = store.update_conversation(
+        conversation_id,
+        {"profile": profile, "title": title, "status": status},
+        user_id=int(user["id"]),
+        include_all=user.get("role") == "owner",
+    )
+    message_type = "search_confirmation" if turn["action"] in {"confirm", "search_requested"} else "assistant_text"
+    assistant = store.add_conversation_message(
+        conversation_id,
+        "assistant",
+        message_type,
+        turn["assistant_message"],
+        {
+            "action": turn["action"],
+            "missing_fields": turn.get("missing_fields") or [],
+            "confirmation": turn.get("confirmation"),
+            "search_query": turn.get("search_query") or "",
+            "profile": profile,
+        },
+    )
+    yield _sse(
+        "message",
+        {
+            "conversation": updated,
+            "message": assistant,
+            "action": turn["action"],
+        },
+    )
+
+
+async def _stream_query_events(
+    query_text: str,
+    request: Request,
+    user: Dict[str, Any],
+    conversation_id: Optional[int] = None,
+) -> AsyncIterator[str]:
+    completed = False
     yield _sse(
         "progress",
         {
@@ -318,9 +542,22 @@ async def _stream_query_events(query_text: str, request: Request, user: Dict[str
             return_code=429,
             duration_ms=0,
         )
-        record = _store_result(query_text, result, status="error", user=user)
+        record = _store_result(query_text, result, status="error", user=user, conversation_id=conversation_id)
+        _record_conversation_result(conversation_id, record, "error")
+        completed = True
         yield _sse("result", record)
         return
+
+    xhs_task = _start_xhs_task(query_text, user)
+    if xhs_task:
+        yield _sse(
+            "progress",
+            {
+                "kind": "xhs",
+                "message": "同时寻找小红书高互动旅行笔记。",
+                "elapsed_ms": 0,
+            },
+        )
 
     timeout_seconds = _timeout_for_user(user)
     stream = hermes_client.run_stream(query_text, timeout_seconds=timeout_seconds)
@@ -353,7 +590,9 @@ async def _stream_query_events(query_text: str, request: Request, user: Dict[str
                     return_code=127,
                     duration_ms=event.elapsed_ms,
                 )
-                record = _store_result(query_text, result, status="error", user=user)
+                record = _store_result(query_text, result, status="error", user=user, conversation_id=conversation_id)
+                _record_conversation_result(conversation_id, record, "error")
+                completed = True
                 yield _sse("result", record)
                 return
 
@@ -364,8 +603,25 @@ async def _stream_query_events(query_text: str, request: Request, user: Dict[str
                     return_code=1,
                     duration_ms=event.elapsed_ms,
                 )
-                record = _store_result(query_text, result, user=user)
+                xhs_blocks = await _completed_xhs_blocks(xhs_task)
+                record = _store_result(query_text, result, user=user, extra_blocks=xhs_blocks, conversation_id=conversation_id)
+                _record_conversation_result(conversation_id, record, record["status"])
+                completed = True
                 yield _sse("result", record)
+                permit.release()
+                if xhs_task and not xhs_blocks and not xhs_task.done():
+                    supplement_blocks = await _await_xhs_blocks(xhs_task)
+                    if supplement_blocks and not await request.is_disconnected():
+                        store.append_blocks(int(record["id"]), supplement_blocks)
+                        _record_conversation_supplement(conversation_id, supplement_blocks)
+                        yield _sse(
+                            "supplement",
+                            {
+                                "query_id": record["id"],
+                                "blocks": supplement_blocks,
+                                "message": "已补充小红书高互动笔记。",
+                            },
+                        )
                 return
     except Exception as exc:  # pragma: no cover - defensive streaming boundary
         if await request.is_disconnected():
@@ -376,11 +632,15 @@ async def _stream_query_events(query_text: str, request: Request, user: Dict[str
             return_code=1,
             duration_ms=0,
         )
-        record = _store_result(query_text, result, status="error", user=user)
+        record = _store_result(query_text, result, status="error", user=user, conversation_id=conversation_id)
+        _record_conversation_result(conversation_id, record, "error")
+        completed = True
         yield _sse("result", record)
     finally:
         stream.close()
         permit.release()
+        if conversation_id and not completed:
+            store.update_conversation(int(conversation_id), {"status": "ready"}, include_all=True)
 
 
 def _next_stream_event(stream: Any) -> Optional[HermesStreamEvent]:
@@ -390,17 +650,61 @@ def _next_stream_event(stream: Any) -> Optional[HermesStreamEvent]:
         return None
 
 
+def _start_xhs_task(query_text: str, user: Dict[str, Any]) -> Optional[asyncio.Task[XhsSearchResult]]:
+    try:
+        if not xhs_client.should_attempt(user):
+            return None
+    except Exception:
+        return None
+    return asyncio.create_task(run_in_threadpool(xhs_client.search, query_text, user))
+
+
+async def _completed_xhs_blocks(task: Optional[asyncio.Task[XhsSearchResult]]) -> List[Dict[str, Any]]:
+    if not task or not task.done():
+        return []
+    try:
+        result = await task
+    except Exception:
+        return []
+    return _xhs_blocks_from_result(result)
+
+
+async def _await_xhs_blocks(task: asyncio.Task[XhsSearchResult]) -> List[Dict[str, Any]]:
+    try:
+        result = await task
+    except Exception:
+        return []
+    return _xhs_blocks_from_result(result)
+
+
+def _xhs_blocks_from_result(result: XhsSearchResult) -> List[Dict[str, Any]]:
+    if result.status == "disabled":
+        return []
+    return result.blocks or []
+
+
 def _store_result(
     query_text: str,
     result: HermesResult,
     status: str | None = None,
     user: Optional[Dict[str, Any]] = None,
+    extra_blocks: Optional[List[Dict[str, Any]]] = None,
+    conversation_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     if status is None:
-        status = "success" if result.return_code == 0 and not result.timed_out and result.stdout.strip() else "error"
+        status = (
+            "success"
+            if result.return_code == 0
+            and not result.timed_out
+            and result.stdout.strip()
+            and not _looks_like_hermes_failure(f"{result.stderr}\n{result.stdout}")
+            else "error"
+        )
 
     if status == "success":
         blocks = normalize_output(result.stdout, query_text)
+        if extra_blocks:
+            blocks.extend(extra_blocks)
     else:
         blocks = error_blocks(_failure_message(result), result.stderr or result.stdout)
 
@@ -412,15 +716,73 @@ def _store_result(
         stderr=result.stderr,
         duration_ms=result.duration_ms,
         user_id=int(user["id"]) if user else None,
+        conversation_id=conversation_id,
+    )
+
+
+def _record_conversation_result(conversation_id: Optional[int], record: Dict[str, Any], status: str) -> None:
+    if not conversation_id:
+        return
+    conversation_status = "result" if status == "success" else "error"
+    store.update_conversation(
+        int(conversation_id),
+        {"status": conversation_status, "last_query_id": record["id"]},
+        include_all=True,
+    )
+    title = "查询结果" if status == "success" else "查询异常"
+    content = f"{title}：{record.get('query', '')}"
+    store.add_conversation_message(
+        int(conversation_id),
+        "assistant",
+        "search_result",
+        content,
+        {
+            "query_id": record.get("id"),
+            "status": record.get("status"),
+            "blocks": record.get("blocks") or [],
+            "duration_ms": record.get("duration_ms"),
+            "created_at": record.get("created_at"),
+        },
+    )
+
+
+def _record_conversation_supplement(conversation_id: Optional[int], blocks: List[Dict[str, Any]]) -> None:
+    if not conversation_id or not blocks:
+        return
+    store.add_conversation_message(
+        int(conversation_id),
+        "assistant",
+        "xhs_posts",
+        "已补充小红书高互动笔记。",
+        {"blocks": blocks},
     )
 
 
 def _history_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for item in items:
         raw_output = item.pop("raw_output", "")
+        stored_blocks = item.get("blocks") or []
+        if _looks_like_hermes_failure(raw_output):
+            item["status"] = "error"
+            item["blocks"] = error_blocks(_failure_message_from_text(raw_output), raw_output)
+            continue
         if item.get("status") == "success" and raw_output:
-            item["blocks"] = normalize_output(raw_output, item.get("query", ""))
+            item["blocks"] = normalize_output(raw_output, item.get("query", "")) + _stored_supplemental_blocks(stored_blocks)
     return items
+
+
+def _stored_supplemental_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    output = []
+    seen = set()
+    for block in blocks:
+        if block.get("supplement") != "xhs" and block.get("type") != "xhs_post_card":
+            continue
+        key = (block.get("type"), block.get("title"), block.get("postUrl") or block.get("bookingUrl"))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(block)
+    return output
 
 
 def _sse(event: str, data: Dict[str, Any]) -> str:
@@ -429,11 +791,31 @@ def _sse(event: str, data: Dict[str, Any]) -> str:
 
 def _failure_message(result: Any) -> str:
     detail = f"{result.stderr}\n{result.stdout}"
+    if _looks_like_hermes_failure(detail):
+        return _failure_message_from_text(detail)
     if result.timed_out:
         return "Hermes 流式查询超过了服务端运行上限。请缩小日期范围、减少筛选条件后重试。"
     if "MCP HTTP 504" in detail or "Gateway Time-out" in detail:
         return "飞猪实时查询接口暂时超时。本应用没有切到 direct-flyai 降级路径；请稍后重试，或把城市、日期、直飞/价格条件拆开查询。"
     return "Hermes 查询失败或超时。"
+
+
+def _looks_like_hermes_failure(text: str) -> bool:
+    if not text:
+        return False
+    markers = (
+        "Failed to initialize agent",
+        "AIAgent.__init__()",
+        "unexpected keyword argument",
+        "Traceback (most recent call last)",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _failure_message_from_text(text: str) -> str:
+    if "Failed to initialize agent" in text or "unexpected keyword argument" in text:
+        return "Hermes Agent 启动失败。请检查服务器上的 Hermes 版本和配置；当前查询没有成功调用到 fly.ai。"
+    return "Hermes 执行过程中发生错误，本次没有拿到可用的实时旅行结果。"
 
 
 def _quota_for_user(user: Dict[str, Any]) -> Dict[str, Any]:

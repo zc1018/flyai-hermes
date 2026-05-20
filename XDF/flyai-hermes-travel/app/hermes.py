@@ -72,6 +72,7 @@ class HermesClient:
             "flyai-web",
             "--max-turns",
             "8",
+            "-Q",
         ]
         if self.settings.hermes_provider:
             command.extend(["--provider", self.settings.hermes_provider])
@@ -92,6 +93,7 @@ class HermesClient:
             "flyai-web",
             "--max-turns",
             "8",
+            "-Q",
         ]
         if self.settings.hermes_provider:
             command.extend(["--provider", self.settings.hermes_provider])

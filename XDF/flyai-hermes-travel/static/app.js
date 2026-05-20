@@ -23,6 +23,10 @@ let activeStreamText = "";
 let activeQueryController = null;
 let currentUser = null;
 let historyItems = [];
+let activeConversation = null;
+let activeConfirmation = null;
+let pendingSearchQuery = "";
+let activeSearchConversationId = null;
 
 const promptTemplates = [
   {
@@ -123,31 +127,39 @@ loginForm.addEventListener("submit", async (event) => {
 
 queryForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const query = queryInput.value.trim();
-  if (!query) return;
+  const message = queryInput.value.trim();
+  if (!message) return;
 
   activeQueryController = new AbortController();
   setQueryBusy(true);
   resultMeta.classList.add("is-visible");
-  resultMeta.textContent = "正在理解你的旅行需求...";
-  renderStreamShell(query);
+  resultMeta.textContent = "正在整理你的旅行需求...";
 
   try {
-    await streamQuery(query, activeQueryController.signal);
+    await ensureConversation();
+    appendChatMessage({ role: "user", content: message, message_type: "user_text" });
+    queryInput.value = "";
+    updateQueryCount();
+    await sendConversationMessage(message, activeQueryController.signal);
     await loadMe();
   } catch (error) {
     const wasAbort = error?.name === "AbortError";
-    renderBlocks([
+    appendResultGroup([
       {
         type: "notice",
         severity: wasAbort ? "warning" : "error",
         title: wasAbort ? "已停止等待" : "请求失败",
         items: [wasAbort ? "你已停止本次查询。可以调整条件后重新发起。" : error.message || "服务端没有返回可用结果。"],
       },
-    ]);
+    ], "error", 0, new Date().toISOString());
   } finally {
     activeQueryController = null;
     setQueryBusy(false);
+    if (pendingSearchQuery) {
+      const queryToRun = pendingSearchQuery;
+      pendingSearchQuery = "";
+      startConversationSearch(queryToRun);
+    }
   }
 });
 
@@ -161,6 +173,13 @@ refreshHistory.addEventListener("click", loadHistory);
 historySearch.addEventListener("input", () => renderHistory(historyItems));
 logoutButton.addEventListener("click", logout);
 results.addEventListener("click", (event) => {
+  const searchButton = event.target.closest("[data-start-search]");
+  if (searchButton) {
+    if (searchButton.disabled) return;
+    const query = searchButton.dataset.query || activeConfirmation?.search_query || "";
+    startConversationSearch(query);
+    return;
+  }
   const button = event.target.closest("[data-template-index]");
   if (!button) return;
   fillPromptTemplate(Number(button.dataset.templateIndex || 0));
@@ -179,6 +198,10 @@ async function logout() {
   activeStreamLog = null;
   activeStreamText = "";
   activeQueryController = null;
+  activeConversation = null;
+  activeConfirmation = null;
+  pendingSearchQuery = "";
+  activeSearchConversationId = null;
   queryInput.value = "";
   historyList.innerHTML = "";
   results.innerHTML = "";
@@ -189,7 +212,7 @@ async function logout() {
 }
 
 async function loadHistory() {
-  historyItems = await request("/api/history");
+  historyItems = await request("/api/conversations");
   renderHistory(historyItems);
 }
 
@@ -197,10 +220,10 @@ function renderHistory(items) {
   historyList.innerHTML = "";
   const keyword = historySearch.value.trim().toLowerCase();
   const visible = keyword
-    ? items.filter((item) => item.query.toLowerCase().includes(keyword))
+    ? items.filter((item) => (item.title || "").toLowerCase().includes(keyword))
     : items;
   if (!visible.length) {
-    historyList.innerHTML = `<p class="small">${items.length ? "没有匹配的历史" : "暂无查询历史"}</p>`;
+    historyList.innerHTML = `<p class="small">${items.length ? "没有匹配的会话" : "暂无旅行会话"}</p>`;
     return;
   }
 
@@ -208,13 +231,10 @@ function renderHistory(items) {
     const button = document.createElement("button");
     button.className = "history-item";
     button.innerHTML = `
-      <strong>${escapeHtml(item.query)}</strong>
-      <span>${formatDate(item.created_at)} · ${statusText(item.status)} · ${durationText(item.duration_ms)}</span>
+      <strong>${escapeHtml(item.title || "新的旅行计划")}</strong>
+      <span>${formatDate(item.updated_at || item.created_at)} · ${conversationStatusText(item.status)}</span>
     `;
-    button.addEventListener("click", () => {
-      queryInput.value = item.query;
-      renderResult({ ...item, raw_output: "" });
-    });
+    button.addEventListener("click", () => loadConversation(item.id));
     historyList.appendChild(button);
   }
 }
@@ -236,6 +256,240 @@ function renderUserState() {
   adminLink.classList.toggle("is-hidden", currentUser.role !== "owner");
 }
 
+async function ensureConversation() {
+  if (activeConversation?.id) return activeConversation;
+  activeConversation = await request("/api/conversations", {
+    method: "POST",
+    body: JSON.stringify({ title: "新的旅行计划" }),
+  });
+  renderConversation(activeConversation);
+  await loadHistory().catch(() => {});
+  return activeConversation;
+}
+
+async function loadConversation(id) {
+  activeConversation = await request(`/api/conversations/${id}`);
+  renderConversation(activeConversation);
+}
+
+function renderConversation(conversation) {
+  activeConversation = conversation;
+  activeConfirmation = null;
+  results.innerHTML = "";
+  const messages = conversation.messages || [];
+  if (!messages.length) {
+    renderEmptyState();
+    return;
+  }
+  const thread = ensureThread();
+  for (const message of messages) {
+    renderConversationMessage(message, thread);
+  }
+  renderProfileSummary(conversation.profile || {});
+}
+
+async function sendConversationMessage(message, signal) {
+  const conversation = await ensureConversation();
+  const response = await fetch(`api/conversations/${conversation.id}/messages/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    signal,
+    body: JSON.stringify({ message }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || response.statusText);
+  }
+  await readSse(response, (message) => handleConversationStreamMessage(message));
+}
+
+function handleConversationStreamMessage(message) {
+  if (message.event !== "message") return false;
+  const payload = message.data || {};
+  if (payload.conversation) {
+    activeConversation = payload.conversation;
+    renderProfileSummary(activeConversation.profile || {});
+  }
+  if (payload.message) {
+    renderConversationMessage(payload.message);
+  }
+  if (payload.action === "search_requested") {
+    const query = payload.message?.data?.search_query || activeConfirmation?.search_query || "";
+    if (query) pendingSearchQuery = query;
+  }
+  loadHistory().catch(() => {});
+  return true;
+}
+
+function renderConversationMessage(message, targetThread = null) {
+  const thread = targetThread || ensureThread();
+  if (message.message_type === "search_result") {
+    const data = message.data || {};
+    appendResultGroup(data.blocks || [], data.status, data.duration_ms, data.created_at);
+    return;
+  }
+  if (message.message_type === "xhs_posts") {
+    appendBlocks(message.data?.blocks || []);
+    return;
+  }
+  if (message.message_type === "search_confirmation") {
+    appendChatMessage(message, thread);
+    renderConfirmationCard(message.data?.confirmation || null, thread);
+    return;
+  }
+  appendChatMessage(message, thread);
+}
+
+function ensureThread() {
+  let thread = results.querySelector(".conversation-thread");
+  if (!thread) {
+    if (results.querySelector(".empty-state")) results.innerHTML = "";
+    thread = document.createElement("div");
+    thread.className = "conversation-thread";
+    results.appendChild(thread);
+  }
+  return thread;
+}
+
+function appendChatMessage(message, targetThread = null) {
+  const thread = targetThread || ensureThread();
+  const bubble = document.createElement("article");
+  const role = message.role === "user" ? "user" : "assistant";
+  bubble.className = `chat-message ${role}`;
+  bubble.innerHTML = `
+    <div class="chat-avatar">${role === "user" ? "你" : "助"}</div>
+    <div class="chat-bubble">
+      <p>${escapeHtml(message.content || "")}</p>
+    </div>
+  `;
+  thread.appendChild(bubble);
+  bubble.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function renderConfirmationCard(confirmation, targetThread = null) {
+  if (!confirmation) return;
+  activeConfirmation = confirmation;
+  const thread = targetThread || ensureThread();
+  expirePreviousSearchButtons(thread);
+  const card = document.createElement("article");
+  card.className = "card confirmation-card";
+  const facts = (confirmation.facts || []).filter((item) => item.value);
+  const searchState = confirmationSearchState();
+  card.innerHTML = `
+    <div class="card-body">
+      <div class="card-title">
+        <h3>${escapeHtml(confirmation.title || "确认查询条件")}</h3>
+      </div>
+      ${confirmation.summary ? `<p class="small">${escapeHtml(confirmation.summary)}</p>` : ""}
+      <div class="confirm-grid">
+        ${facts.map((item) => `<div><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(item.value)}</strong></div>`).join("")}
+      </div>
+      ${confirmation.preferences?.length ? compactTags(confirmation.preferences) : ""}
+      ${confirmation.avoid?.length ? `<p class="small">避开：${escapeHtml(confirmation.avoid.join("、"))}</p>` : ""}
+      <div class="confirm-actions">
+        <span>确认后会消耗一次实时查询额度。</span>
+        <button type="button" data-start-search data-current-confirmation="true" data-query="${escapeHtml(confirmation.search_query || "")}" ${searchState.disabled ? "disabled" : ""}>${escapeHtml(searchState.label)}</button>
+      </div>
+    </div>
+  `;
+  thread.appendChild(card);
+  card.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+function expirePreviousSearchButtons(scope = document) {
+  scope.querySelectorAll("[data-start-search]").forEach((button) => {
+    button.dataset.currentConfirmation = "false";
+    button.disabled = true;
+    if (button.textContent === "开始查询") {
+      button.textContent = "已更新";
+    }
+  });
+}
+
+function confirmationSearchState() {
+  if (activeSearchConversationId && activeConversation?.id === activeSearchConversationId) {
+    return { disabled: true, label: "查询中" };
+  }
+  switch (activeConversation?.status) {
+    case "ready":
+      return { disabled: false, label: "开始查询" };
+    case "running":
+      return { disabled: true, label: "查询中" };
+    case "result":
+      return { disabled: true, label: "已查询" };
+    case "error":
+      return { disabled: true, label: "已结束" };
+    default:
+      return { disabled: true, label: "继续补充" };
+  }
+}
+
+function renderProfileSummary(profile) {
+  const summary = profile.summary || "继续补充目的地、时间、预算和偏好";
+  resultMeta.classList.add("is-visible");
+  resultMeta.textContent = activeConversation ? `${activeConversation.title || "旅行计划"} · ${summary}` : summary;
+}
+
+async function startConversationSearch(query) {
+  if (!activeConversation?.id || activeQueryController) return;
+  activeSearchConversationId = activeConversation.id;
+  activeQueryController = new AbortController();
+  setQueryBusy(true, "查询中");
+  setSearchButtonsBusy(true, "查询中");
+  resultMeta.classList.add("is-visible");
+  resultMeta.textContent = "确认收到，正在调用实时旅行数据源...";
+  renderStreamShell(conversationSearchSummary(query));
+  try {
+    await streamQuery(query, activeQueryController.signal, activeConversation.id);
+    await loadMe();
+    await loadConversation(activeConversation.id);
+  } catch (error) {
+    const wasAbort = error?.name === "AbortError";
+    appendResultGroup([
+      {
+        type: "notice",
+        severity: wasAbort ? "warning" : "error",
+        title: wasAbort ? "已停止等待" : "查询失败",
+        items: [wasAbort ? "你已停止本次查询。可以继续改条件后重新发起。" : error.message || "服务端没有返回可用结果。"],
+      },
+    ], "error", 0, new Date().toISOString());
+  } finally {
+    activeQueryController = null;
+    activeSearchConversationId = null;
+    setQueryBusy(false);
+    setSearchButtonsBusy(false);
+  }
+}
+
+function setSearchButtonsBusy(value, label = "查询中") {
+  document.querySelectorAll("[data-start-search]").forEach((button) => {
+    if (button.dataset.currentConfirmation !== "true") {
+      button.disabled = true;
+      if (button.textContent === "开始查询") button.textContent = "已更新";
+      return;
+    }
+    const state = confirmationSearchState();
+    button.disabled = value || state.disabled;
+    button.textContent = value ? label : state.label;
+  });
+}
+
+function conversationSearchSummary(query) {
+  const profile = activeConversation?.profile || {};
+  return profile.summary || activeConfirmation?.summary || summarizeInternalQuery(query) || "已确认的旅行需求";
+}
+
+function summarizeInternalQuery(query) {
+  const text = String(query || "").trim();
+  if (!text) return "";
+  if (text.startsWith("请基于以下多轮旅行需求") || text.startsWith("你是旅行查询 agent")) {
+    const match = text.match(/旅行概要[：:]\s*(.+)/);
+    return match ? match[1].trim() : "";
+  }
+  return text.length > 120 ? `${text.slice(0, 120)}...` : text;
+}
+
 function renderResult(data) {
   resultMeta.classList.add("is-visible");
   resultMeta.textContent = `${data.status === "success" ? "查询完成" : "查询异常"} · ${durationText(data.duration_ms)} · ${formatDate(data.created_at)}`;
@@ -244,8 +498,9 @@ function renderResult(data) {
   renderBlocks(data.blocks || []);
 }
 
-async function streamQuery(query, signal) {
-  const response = await fetch("api/query/stream", {
+async function streamQuery(query, signal, conversationId = null) {
+  const path = conversationId ? `api/conversations/${conversationId}/search/stream` : "api/query/stream";
+  const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -259,7 +514,10 @@ async function streamQuery(query, signal) {
   if (!response.body) {
     throw new Error("浏览器不支持流式响应。");
   }
+  return readSse(response, (message) => handleStreamMessage(message, { conversationMode: Boolean(conversationId) }));
+}
 
+async function readSse(response, onMessage) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -277,7 +535,7 @@ async function streamQuery(query, signal) {
       buffer = buffer.slice(boundary + 2);
       const message = parseSseFrame(frame);
       if (message) {
-        completed = handleStreamMessage(message) || completed;
+        completed = onMessage(message) || completed;
       }
       boundary = buffer.indexOf("\n\n");
     }
@@ -303,7 +561,7 @@ function parseSseFrame(frame) {
   }
 }
 
-function handleStreamMessage(message) {
+function handleStreamMessage(message, options = {}) {
   if (message.event === "progress") {
     const payload = message.data || {};
     const seconds = Math.max(0, Math.round((payload.elapsed_ms || 0) / 1000));
@@ -313,17 +571,34 @@ function handleStreamMessage(message) {
     } else if (payload.kind === "heartbeat") {
       resultMeta.textContent = `还在等实时结果 · ${seconds}s`;
       setProgressStep("search");
+    } else if (payload.kind === "xhs") {
+      resultMeta.textContent = "实时查询进行中，也在补充小红书灵感...";
+      setProgressStep("xhs");
     } else {
       resultMeta.textContent = `正在查询实时旅行信息 · ${seconds}s`;
       setProgressStep("search");
     }
-    if (payload.kind !== "heartbeat") appendStreamLog(payload.message || "");
+    if (!["heartbeat", "chunk"].includes(payload.kind)) appendStreamLog(payload.message || "");
     return false;
   }
 
   if (message.event === "result") {
     setProgressStep("shape");
-    renderResult(message.data);
+    if (options.conversationMode) {
+      appendResultGroup(message.data?.blocks || [], message.data?.status, message.data?.duration_ms, message.data?.created_at);
+      resultMeta.classList.add("is-visible");
+      resultMeta.textContent = `${message.data?.status === "success" ? "查询完成" : "查询异常"} · ${durationText(message.data?.duration_ms)} · ${formatDate(message.data?.created_at)}`;
+    } else {
+      renderResult(message.data);
+    }
+    loadHistory().catch(() => {});
+    return true;
+  }
+  if (message.event === "supplement") {
+    const payload = message.data || {};
+    appendBlocks(payload.blocks || []);
+    resultMeta.classList.add("is-visible");
+    resultMeta.textContent = payload.message || "已补充更多旅行灵感。";
     loadHistory().catch(() => {});
     return true;
   }
@@ -332,7 +607,6 @@ function handleStreamMessage(message) {
 
 function renderStreamShell(query) {
   activeStreamText = "";
-  results.innerHTML = "";
   const card = document.createElement("article");
   card.className = "card stream-card";
   card.innerHTML = `
@@ -345,12 +619,13 @@ function renderStreamShell(query) {
       <ol class="progress-steps" aria-label="查询进度">
         <li data-step="queue" class="is-active"><span></span>排队</li>
         <li data-step="search"><span></span>实时查询</li>
+        <li data-step="xhs"><span></span>社区灵感</li>
         <li data-step="shape"><span></span>整理卡片</li>
       </ol>
       <div class="progress-hints" aria-label="等待提示">
         <span>优先展示价格、班次号和时间</span>
         <span>往返尽量拆成去程和返程</span>
-        <span>原始说明会放在结果后面</span>
+        <span>启用后会补充小红书高互动笔记</span>
       </div>
       <details class="stream-details">
         <summary>查看执行明细</summary>
@@ -362,9 +637,9 @@ function renderStreamShell(query) {
   results.appendChild(card);
 }
 
-function setQueryBusy(value) {
+function setQueryBusy(value, busyText = "发送中") {
   queryButton.disabled = value;
-  queryButton.textContent = value ? "查询中" : "查询";
+  queryButton.textContent = value ? busyText : "发送";
   clearQueryButton.disabled = value;
   cancelQueryButton.classList.toggle("is-hidden", !value);
 }
@@ -400,6 +675,36 @@ function renderBlocks(blocks) {
   }
 }
 
+function appendResultGroup(blocks, status = "success", durationMs = 0, createdAt = "") {
+  if (results.querySelector(".empty-state")) results.innerHTML = "";
+  const section = document.createElement("section");
+  section.className = "result-group";
+  section.innerHTML = `
+    <div class="result-group-head">
+      <strong>${status === "success" ? "查询结果" : "查询异常"}</strong>
+      <span>${[durationText(durationMs), formatDate(createdAt)].filter(Boolean).join(" · ")}</span>
+    </div>
+  `;
+  results.appendChild(section);
+  if (!blocks.length) {
+    blocks = [{ type: "notice", title: "没有结果", items: ["没有可展示的内容。"] }];
+  }
+  for (const block of blocks) {
+    section.appendChild(renderBlock(block));
+  }
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function appendBlocks(blocks) {
+  if (!blocks.length) return;
+  if (results.querySelector(".empty-state")) {
+    results.innerHTML = "";
+  }
+  for (const block of blocks) {
+    results.appendChild(renderBlock(block));
+  }
+}
+
 function renderEmptyState() {
   if (results.children.length) return;
   results.innerHTML = `
@@ -420,7 +725,7 @@ function renderEmptyState() {
 }
 
 function setProgressStep(step) {
-  const order = ["queue", "search", "shape"];
+  const order = ["queue", "search", "xhs", "shape"];
   const activeIndex = Math.max(0, order.indexOf(step));
   document.querySelectorAll(".progress-steps li").forEach((item) => {
     const index = order.indexOf(item.dataset.step);
@@ -444,6 +749,8 @@ function renderBlock(block) {
       return tableCard(block);
     case "booking_link":
       return bookingCard(block);
+    case "xhs_post_card":
+      return xhsPostCard(block);
     case "guide_section":
       return guideCard(block);
     case "notice":
@@ -595,6 +902,27 @@ function bookingCard(block) {
   return card;
 }
 
+function xhsPostCard(block) {
+  const { card, body } = baseCard(block, "xhs-post");
+  body.innerHTML = titleRow(block, "小红书笔记");
+  const stats = compactTags([
+    block.source || "小红书",
+    block.author ? `作者 ${block.author}` : "",
+    statText("赞", block.likedCount),
+    statText("藏", block.collectedCount),
+    statText("评", block.commentCount),
+  ]);
+  if (stats) body.insertAdjacentHTML("beforeend", stats);
+  if (block.summary) {
+    const summary = document.createElement("p");
+    summary.className = "xhs-summary";
+    summary.textContent = block.summary;
+    body.appendChild(summary);
+  }
+  appendBooking(body, block.postUrl || block.bookingUrl, "打开小红书笔记");
+  return card;
+}
+
 function noticeCard(block) {
   const severityClass = block.severity === "error" ? "error" : block.severity === "warning" ? "warning" : "";
   const { card, body } = baseCard(block, `notice ${severityClass}`);
@@ -617,14 +945,14 @@ function appendItems(container, items = []) {
   if (list.children.length) container.appendChild(list);
 }
 
-function appendBooking(container, url) {
+function appendBooking(container, url, label = "打开预订链接") {
   if (!url) return;
   const link = document.createElement("a");
   link.className = "booking";
   link.href = url;
   link.target = "_blank";
   link.rel = "noreferrer";
-  link.textContent = "打开预订链接";
+  link.textContent = label;
   container.appendChild(link);
 }
 
@@ -663,6 +991,17 @@ function compactTags(values) {
 
 function compactText(values) {
   return values.filter(Boolean).join(" · ");
+}
+
+function statText(label, value) {
+  const number = Number(value || 0);
+  if (!number) return "";
+  return `${label} ${formatCount(number)}`;
+}
+
+function formatCount(value) {
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`;
+  return String(value);
 }
 
 function routeOverviewHtml(block, segments) {
@@ -707,6 +1046,8 @@ function cleanGuideItem(item) {
   if (/^```/.test(text)) return "";
   if (/^\|?\s*:?-{2,}/.test(text)) return "";
   if (/^\|?\s*(航段|日期|航班号|航班|出发|到达|价格|票价|时长)\s*\|/.test(text)) return "";
+  if (/^(flightcard|hotelcard|traincard|poicard|destinationcard)$/i.test(text.replace(/\s+/g, ""))) return "";
+  if (/^(type|title|price|number|segments|items)\s*[:：=]/i.test(text)) return "";
   if (/^当前为体验模式/.test(text)) return "";
   return text.replace(/<[^>]+>/g, "").trim();
 }
