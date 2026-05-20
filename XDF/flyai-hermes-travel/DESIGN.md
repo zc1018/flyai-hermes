@@ -2,12 +2,12 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-05-19
+- Last refreshed: 2026-05-20
 - Primary product surfaces: 登录页、旅行查询工作台、查询历史、结果卡片、owner 后台
 - Evidence reviewed: `README.md`, `static/index.html`, `static/app.js`, `static/styles.css`, `static/admin.html`, `static/admin.js`, `app/main.py`, `app/models.py`
 
 ## Brand
-- Personality: 可靠、清爽、行动导向，像一个熟人小范围可用的旅行查询产品，而不是内部调试台。
+- Personality: 可靠、清爽、轻松、有出发感，像一个熟人小范围可用的旅行查询产品，而不是内部调试台。
 - Trust signals: 环境状态、当前账户/额度、流式进度、明确错误提示、隐私提醒。
 - Avoid: 大面积营销 hero、装饰性渐变球、过度拟物、只有单一绿色调的界面、把 Hermes 原始执行日志作为主要视觉焦点。
 
@@ -32,16 +32,16 @@
 - Tradeoffs: 保持原生 HTML/CSS/JS，不引入前端框架，换取部署简单和低维护成本。
 
 ## Visual language
-- Color: 以中性色为底，使用绿色表达可用/行动，蓝色表达信息，琥珀色表达价格和注意。
+- Color: 以天空蓝、海绿色、暖沙色和中性色为底，绿色表达可用/行动，蓝色表达信息，琥珀色表达价格和注意。
 - Typography: 系统无衬线字体，标题紧凑，卡片内避免过大字号。
 - Spacing/layout rhythm: 8px radius，12/16/24px 间距节奏，桌面双栏，移动端单栏。
 - Shape/radius/elevation: 卡片 8px radius，轻边框和浅阴影；按钮和状态 pill 保持紧凑。
 - Motion: 只使用轻量 hover/focus，不使用大幅动画。
-- Imagery/iconography: 使用小型符号和结构线表达旅行路径，不依赖外部图片。
+- Imagery/iconography: 使用登机牌、路线线条和轻地图纹理表达旅行路径，不依赖外部图片。
 
 ## Components
 - Existing components to reuse: status pill、history item、query form、card、timeline、admin user row。
-- New/changed components: prompt chips、empty state、query stats row、progress shell、history search。
+- New/changed components: scene prompt cards、input guide chips、empty state、query stats row、friendly progress shell、history search。
 - Variants and states: loading、queued、heartbeat、success、error、quota warning、empty history。
 - Token/component ownership: `static/styles.css` 继续作为唯一样式源。
 

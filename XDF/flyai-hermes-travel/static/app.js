@@ -23,10 +23,26 @@ let currentUser = null;
 let historyItems = [];
 
 const promptTemplates = [
-  "北京东京往返机票，停留 5 晚，上午北京出发，下午或晚上东京返回，不转机，给我最低价方案，要航班号和价格。",
-  "上海出发，暑假夫妻两个人出国游 7 天，价差和非暑假差距不要太大，安全、发达、直飞，不要重要转机。",
-  "杭州西湖附近 5 月 20 到 22 号酒店，预算每晚 800 以内，优先评分高、交通方便。",
-  "成都 4 天 3 晚亲子旅行攻略，节奏不要太赶，给每天安排和适合住的区域。",
+  {
+    label: "查往返机票",
+    hint: "航班号、时间、价格",
+    query: "北京东京往返机票，停留 5 晚，上午北京出发，下午或晚上东京返回，不转机，给我最低价方案，要航班号和价格。",
+  },
+  {
+    label: "找假期目的地",
+    hint: "安全、直飞、预算友好",
+    query: "上海出发，暑假夫妻两个人出国游 7 天，价差和非暑假差距不要太大，安全、发达、直飞，不要重要转机。",
+  },
+  {
+    label: "筛酒店",
+    hint: "位置、评分、预算",
+    query: "杭州西湖附近 5 月 20 到 22 号酒店，预算每晚 800 以内，优先评分高、交通方便。",
+  },
+  {
+    label: "做行程",
+    hint: "每天安排和住宿区域",
+    query: "成都 4 天 3 晚亲子旅行攻略，节奏不要太赶，给每天安排和适合住的区域。",
+  },
 ];
 
 async function request(path, options = {}) {
@@ -111,7 +127,7 @@ queryForm.addEventListener("submit", async (event) => {
   queryButton.disabled = true;
   queryButton.textContent = "查询中";
   resultMeta.classList.add("is-visible");
-  resultMeta.textContent = "正在理解需求并准备调用 flyai...";
+  resultMeta.textContent = "正在理解你的旅行需求...";
   renderStreamShell();
 
   try {
@@ -275,11 +291,14 @@ function handleStreamMessage(message) {
     const payload = message.data || {};
     const seconds = Math.max(0, Math.round((payload.elapsed_ms || 0) / 1000));
     if (payload.kind === "queued") {
-      resultMeta.textContent = "正在排队，等待查询资源...";
+      resultMeta.textContent = "正在排队，马上开始查询...";
+      setProgressStep("queue");
     } else if (payload.kind === "heartbeat") {
-      resultMeta.textContent = `Hermes 仍在运行 · ${seconds}s`;
+      resultMeta.textContent = `正在等待实时结果 · ${seconds}s`;
+      setProgressStep("search");
     } else {
-      resultMeta.textContent = `Hermes 实时执行中 · ${seconds}s`;
+      resultMeta.textContent = `正在查询实时旅行信息 · ${seconds}s`;
+      setProgressStep("search");
     }
     if (payload.kind !== "heartbeat") appendStreamLog(payload.message || "");
     return false;
@@ -301,10 +320,18 @@ function renderStreamShell() {
   card.innerHTML = `
     <div class="card-body">
       <div class="card-title">
-        <h3>实时查询进度</h3>
+        <h3>正在整理你的旅行方案</h3>
       </div>
-      <p class="small">复杂行程通常需要几十秒。页面保持打开即可，结果完成后会自动替换为卡片。</p>
-      <pre class="stream-log" aria-live="polite"></pre>
+      <p class="small">实时票价和酒店信息需要一点时间。页面保持打开即可，完成后会自动换成结果卡片。</p>
+      <ol class="progress-steps" aria-label="查询进度">
+        <li data-step="queue" class="is-active"><span></span>排队</li>
+        <li data-step="search"><span></span>实时查询</li>
+        <li data-step="shape"><span></span>整理卡片</li>
+      </ol>
+      <details class="stream-details">
+        <summary>查看执行明细</summary>
+        <pre class="stream-log" aria-live="polite"></pre>
+      </details>
     </div>
   `;
   activeStreamLog = card.querySelector(".stream-log");
@@ -349,11 +376,26 @@ function renderEmptyState() {
       <div class="empty-map" aria-hidden="true"><span></span><span></span><span></span></div>
       <div>
         <p class="section-label">准备查询</p>
-        <h2>先从一个具体问题开始</h2>
-        <p>说清楚城市、日期、人数、预算和偏好。往返机票请明确去程和返程要求，系统会优先生成双段航班卡片。</p>
+        <h2>先从一个真实问题开始</h2>
+        <p>比如最低价往返机票、某个区域的酒店、适合假期的目的地，或者每天怎么安排。往返机票请把去程和返程条件都写清楚。</p>
+        <div class="guide-steps" aria-label="查询建议">
+          <span>1. 说清目的地</span>
+          <span>2. 写明时间</span>
+          <span>3. 加上偏好</span>
+        </div>
       </div>
     </article>
   `;
+}
+
+function setProgressStep(step) {
+  const order = ["queue", "search", "shape"];
+  const activeIndex = Math.max(0, order.indexOf(step));
+  document.querySelectorAll(".progress-steps li").forEach((item) => {
+    const index = order.indexOf(item.dataset.step);
+    item.classList.toggle("is-active", index === activeIndex);
+    item.classList.toggle("is-complete", index >= 0 && index < activeIndex);
+  });
 }
 
 function renderBlock(block) {
@@ -545,14 +587,14 @@ function appendBooking(container, url) {
 
 function renderPromptChips() {
   promptChips.innerHTML = "";
-  promptTemplates.forEach((template, index) => {
+  promptTemplates.forEach((template) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "prompt-chip";
-    button.textContent = ["往返机票", "目的地推荐", "酒店筛选", "行程攻略"][index];
-    button.title = template;
+    button.innerHTML = `<strong>${escapeHtml(template.label)}</strong><span>${escapeHtml(template.hint)}</span>`;
+    button.title = template.query;
     button.addEventListener("click", () => {
-      queryInput.value = template;
+      queryInput.value = template.query;
       updateQueryCount();
       queryInput.focus();
     });
