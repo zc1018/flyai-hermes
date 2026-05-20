@@ -175,23 +175,22 @@ def server_blocks(text: str):
 changed = False
 for path in sorted(Path("/etc/nginx/conf.d").glob("*.conf")):
     text = path.read_text()
-    if marker in text and end_marker in text:
-        shutil.copy2(path, f"{path}.bak.{app_name}")
-        pattern = re.compile(rf"\n?\s*{re.escape(marker)}.*?{re.escape(end_marker)}\n?", re.S)
-        text = pattern.sub("\n" + location + "\n", text)
-        path.write_text(text)
-        changed = True
-        continue
-    inserts = []
+    edits = []
     for start, end in server_blocks(text):
         block = text[start : end + 1]
-        if "server_name" in block and server_name in block:
-            inserts.append(end)
-    if not inserts:
+        if "server_name" not in block or server_name not in block:
+            continue
+        if marker in block and end_marker in block:
+            pattern = re.compile(rf"\n?\s*{re.escape(marker)}.*?{re.escape(end_marker)}\n?", re.S)
+            new_block = pattern.sub("\n" + location + "\n", block)
+            edits.append((start, end + 1, new_block))
+        else:
+            edits.append((end, end, location + "\n"))
+    if not edits:
         continue
     shutil.copy2(path, f"{path}.bak.{app_name}")
-    for end in reversed(inserts):
-        text = text[:end] + location + "\n" + text[end:]
+    for start, end, replacement in reversed(edits):
+        text = text[:start] + replacement + text[end:]
     path.write_text(text)
     changed = True
 
@@ -216,6 +215,18 @@ sudo nginx -t
 sudo systemctl reload nginx
 
 echo "Local health check"
-curl -fsS "http://127.0.0.1:${PORT}/api/health"
+health_ok=0
+for attempt in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:${PORT}/api/health"; then
+    health_ok=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${health_ok}" != "1" ]]; then
+  echo "Service did not become healthy on 127.0.0.1:${PORT}" >&2
+  sudo systemctl status "${SERVICE_NAME}" --no-pager || true
+  exit 1
+fi
 echo
 echo "Done: http://${SERVER_NAME}${PUBLIC_PATH}"
