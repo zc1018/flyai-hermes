@@ -4,12 +4,13 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import time
 from typing import Any, Dict, Optional
 
 
-COOKIE_NAME = "flyai_travel_session"
+COOKIE_NAME = os.getenv("COOKIE_NAME", "flyai_travel_session")
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 7
 HASH_ITERATIONS = 260_000
 

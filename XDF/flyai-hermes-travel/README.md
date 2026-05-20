@@ -46,6 +46,7 @@ OWNER_PASSWORD=change-me uvicorn app.main:app --host 0.0.0.0 --port 8787
 | `APP_PASSWORD` | 空 | 旧单口令兼容项，不建议新部署使用 |
 | `SESSION_SECRET` | 随机生成 | Cookie 签名密钥，生产环境必须固定为长随机字符串 |
 | `SECURE_COOKIES` | `false` | HTTPS 部署时设为 `true` |
+| `COOKIE_NAME` | `flyai_travel_session` | 登录 Cookie 名；同域名并行部署 v2 时应改成独立名称 |
 | `HERMES_BIN` | `/Users/xdf/.local/bin/hermes` | Hermes 可执行文件路径 |
 | `HERMES_HOME` | `~/.hermes` | Hermes home，用于检查 skill |
 | `HERMES_SKILL` | `flyai` | Hermes 加载的 skill 名称 |
@@ -169,6 +170,7 @@ PORT=8791 \
 SERVER_NAME=travel-v2.100zhang.top \
 PUBLIC_PATH=/ \
 DATABASE_PATH=data/travel-v2.db \
+COOKIE_NAME=flyai_travel_v2_session \
 OWNER_PASSWORD='your-owner-password' \
 SESSION_SECRET='your-long-random-secret' \
 SECURE_COOKIES=true \

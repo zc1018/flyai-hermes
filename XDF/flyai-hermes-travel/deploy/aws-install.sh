@@ -9,6 +9,7 @@ PORT="${PORT:-8787}"
 PUBLIC_PATH="${PUBLIC_PATH:-/flyai-travel/}"
 SERVER_NAME="${SERVER_NAME:-100zhang.top}"
 DATABASE_PATH="${DATABASE_PATH:-data/travel.db}"
+COOKIE_NAME="${COOKIE_NAME:-flyai_travel_session}"
 OWNER_PASSWORD="${OWNER_PASSWORD:-${APP_PASSWORD:-change-me}}"
 SESSION_SECRET="${SESSION_SECRET:-$(python3 - <<'PY'
 import secrets
@@ -70,6 +71,7 @@ cat > .env <<EOF
 OWNER_PASSWORD=${OWNER_PASSWORD}
 SESSION_SECRET=${SESSION_SECRET}
 SECURE_COOKIES=${SECURE_COOKIES:-false}
+COOKIE_NAME=${COOKIE_NAME}
 HERMES_BIN=/home/ec2-user/.local/bin/hermes
 HERMES_HOME=/home/ec2-user/.hermes
 HERMES_SKILL=flyai
