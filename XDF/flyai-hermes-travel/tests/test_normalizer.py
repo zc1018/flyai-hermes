@@ -129,6 +129,17 @@ def test_combines_round_trip_candidates_without_placeholder_price_or_structural_
     assert "北京→东京 去程" not in str(blocks[1].get("items", []))
 
 
+def test_filters_runtime_platform_notice_blocks():
+    raw = """
+{"summary":"西湖免费开放。","blocks":[{"type":"poi_card","title":"西湖风景名胜区","price":"免费","items":["全天开放"]},{"type":"notice","title":"平台提示","items":["当前为体验模式，部分搜索结果可能受限，请前往 飞猪AI开放平台 获取正式API Key解锁完整服务。"]}]}
+"""
+
+    blocks = normalize_output(raw)
+
+    assert [block["title"] for block in blocks] == ["查询结论", "西湖风景名胜区"]
+    assert "当前为体验模式" not in str(blocks)
+
+
 def test_converts_hotel_item_list():
     raw = """
     {

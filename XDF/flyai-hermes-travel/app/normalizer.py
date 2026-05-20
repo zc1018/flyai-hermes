@@ -150,6 +150,7 @@ def normalize_output(raw_output: str, user_query: str = "") -> List[Dict[str, An
 
 
 def _postprocess_blocks(blocks: List[Dict[str, Any]], source_text: str, user_query: str) -> List[Dict[str, Any]]:
+    blocks = _filter_noise_blocks(blocks)
     if not _wants_round_trip_flight(user_query, source_text):
         return blocks
     if any(_complete_round_trip_flight_card(block, source_text) for block in blocks):
@@ -618,7 +619,12 @@ def _normalize_block(block: Dict[str, Any]) -> Dict[str, Any]:
             normalized[key] = [
                 _clean_display_line(item) if isinstance(item, str) else item
                 for item in value
-                if not isinstance(item, str) or _clean_display_line(item)
+                if not isinstance(item, str)
+                or (
+                    _clean_display_line(item)
+                    and not _is_runtime_notice(_clean_display_line(item))
+                    and not _is_structural_noise_line(_clean_display_line(item))
+                )
             ]
 
     if "meta" in normalized and not isinstance(normalized["meta"], dict):
@@ -2304,6 +2310,24 @@ def _is_structural_noise_line(clean: str) -> bool:
     if re.match(r'^(type|title|price|number|segments|items)\s*[:：=]', clean, flags=re.IGNORECASE):
         return True
     return False
+
+
+def _filter_noise_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    filtered = [block for block in blocks if not _is_noise_block(block)]
+    return filtered or [_empty_notice()]
+
+
+def _is_noise_block(block: Dict[str, Any]) -> bool:
+    title = str(block.get("title") or "")
+    items = [str(item) for item in block.get("items") or []]
+    if not items and re.search(r"(平台提示|查询提示|系统提示)", title):
+        return True
+    if not items:
+        return False
+    if all(_is_runtime_notice(_clean_display_line(item)) for item in items):
+        return True
+    text = "\n".join([title, *items])
+    return bool(re.search(r"(平台提示|查询提示|系统提示)", title) and _is_runtime_notice(text))
 
 
 def _empty_notice() -> Dict[str, Any]:
