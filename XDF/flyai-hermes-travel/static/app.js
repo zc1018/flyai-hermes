@@ -17,8 +17,10 @@ const logoutButton = document.querySelector("#logoutButton");
 const promptChips = document.querySelector("#promptChips");
 const queryCount = document.querySelector("#queryCount");
 const clearQueryButton = document.querySelector("#clearQueryButton");
+const cancelQueryButton = document.querySelector("#cancelQueryButton");
 let activeStreamLog = null;
 let activeStreamText = "";
+let activeQueryController = null;
 let currentUser = null;
 let historyItems = [];
 
@@ -124,27 +126,28 @@ queryForm.addEventListener("submit", async (event) => {
   const query = queryInput.value.trim();
   if (!query) return;
 
-  queryButton.disabled = true;
-  queryButton.textContent = "查询中";
+  activeQueryController = new AbortController();
+  setQueryBusy(true);
   resultMeta.classList.add("is-visible");
   resultMeta.textContent = "正在理解你的旅行需求...";
-  renderStreamShell();
+  renderStreamShell(query);
 
   try {
-    await streamQuery(query);
+    await streamQuery(query, activeQueryController.signal);
     await loadMe();
   } catch (error) {
+    const wasAbort = error?.name === "AbortError";
     renderBlocks([
       {
         type: "notice",
-        severity: "error",
-        title: "请求失败",
-        items: [error.message || "服务端没有返回可用结果。"],
+        severity: wasAbort ? "warning" : "error",
+        title: wasAbort ? "已停止等待" : "请求失败",
+        items: [wasAbort ? "你已停止本次查询。可以调整条件后重新发起。" : error.message || "服务端没有返回可用结果。"],
       },
     ]);
   } finally {
-    queryButton.disabled = false;
-    queryButton.textContent = "查询";
+    activeQueryController = null;
+    setQueryBusy(false);
   }
 });
 
@@ -157,12 +160,25 @@ clearQueryButton.addEventListener("click", () => {
 refreshHistory.addEventListener("click", loadHistory);
 historySearch.addEventListener("input", () => renderHistory(historyItems));
 logoutButton.addEventListener("click", logout);
+results.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-template-index]");
+  if (!button) return;
+  fillPromptTemplate(Number(button.dataset.templateIndex || 0));
+});
+cancelQueryButton.addEventListener("click", () => {
+  if (!activeQueryController) return;
+  activeQueryController.abort();
+  resultMeta.classList.add("is-visible");
+  resultMeta.textContent = "已停止等待，本次页面不会继续接收结果。";
+});
 
 async function logout() {
+  if (activeQueryController) activeQueryController.abort();
   await request("/api/logout", { method: "POST" }).catch(() => {});
   currentUser = null;
   activeStreamLog = null;
   activeStreamText = "";
+  activeQueryController = null;
   queryInput.value = "";
   historyList.innerHTML = "";
   results.innerHTML = "";
@@ -228,11 +244,12 @@ function renderResult(data) {
   renderBlocks(data.blocks || []);
 }
 
-async function streamQuery(query) {
+async function streamQuery(query, signal) {
   const response = await fetch("api/query/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
+    signal,
     body: JSON.stringify({ query }),
   });
   if (!response.ok) {
@@ -294,7 +311,7 @@ function handleStreamMessage(message) {
       resultMeta.textContent = "正在排队，马上开始查询...";
       setProgressStep("queue");
     } else if (payload.kind === "heartbeat") {
-      resultMeta.textContent = `正在等待实时结果 · ${seconds}s`;
+      resultMeta.textContent = `还在等实时结果 · ${seconds}s`;
       setProgressStep("search");
     } else {
       resultMeta.textContent = `正在查询实时旅行信息 · ${seconds}s`;
@@ -305,6 +322,7 @@ function handleStreamMessage(message) {
   }
 
   if (message.event === "result") {
+    setProgressStep("shape");
     renderResult(message.data);
     loadHistory().catch(() => {});
     return true;
@@ -312,7 +330,7 @@ function handleStreamMessage(message) {
   return false;
 }
 
-function renderStreamShell() {
+function renderStreamShell(query) {
   activeStreamText = "";
   results.innerHTML = "";
   const card = document.createElement("article");
@@ -322,12 +340,18 @@ function renderStreamShell() {
       <div class="card-title">
         <h3>正在整理你的旅行方案</h3>
       </div>
+      <p class="stream-query">${escapeHtml(query)}</p>
       <p class="small">实时票价和酒店信息需要一点时间。页面保持打开即可，完成后会自动换成结果卡片。</p>
       <ol class="progress-steps" aria-label="查询进度">
         <li data-step="queue" class="is-active"><span></span>排队</li>
         <li data-step="search"><span></span>实时查询</li>
         <li data-step="shape"><span></span>整理卡片</li>
       </ol>
+      <div class="progress-hints" aria-label="等待提示">
+        <span>优先展示价格、班次号和时间</span>
+        <span>往返尽量拆成去程和返程</span>
+        <span>原始说明会放在结果后面</span>
+      </div>
       <details class="stream-details">
         <summary>查看执行明细</summary>
         <pre class="stream-log" aria-live="polite"></pre>
@@ -336,6 +360,13 @@ function renderStreamShell() {
   `;
   activeStreamLog = card.querySelector(".stream-log");
   results.appendChild(card);
+}
+
+function setQueryBusy(value) {
+  queryButton.disabled = value;
+  queryButton.textContent = value ? "查询中" : "查询";
+  clearQueryButton.disabled = value;
+  cancelQueryButton.classList.toggle("is-hidden", !value);
 }
 
 async function responseErrorText(response) {
@@ -374,14 +405,14 @@ function renderEmptyState() {
   results.innerHTML = `
     <article class="empty-state">
       <div class="empty-map" aria-hidden="true"><span></span><span></span><span></span></div>
-      <div>
+      <div class="empty-content">
         <p class="section-label">准备查询</p>
         <h2>先从一个真实问题开始</h2>
-        <p>比如最低价往返机票、某个区域的酒店、适合假期的目的地，或者每天怎么安排。往返机票请把去程和返程条件都写清楚。</p>
-        <div class="guide-steps" aria-label="查询建议">
-          <span>1. 说清目的地</span>
-          <span>2. 写明时间</span>
-          <span>3. 加上偏好</span>
+        <p>把城市、日期、人数、预算和偏好放进一句话里。往返机票请同时写清去程和返程，结果会更完整。</p>
+        <div class="empty-actions" aria-label="示例查询">
+          <button type="button" data-template-index="0">查往返机票</button>
+          <button type="button" data-template-index="1">找假期目的地</button>
+          <button type="button" data-template-index="2">筛酒店</button>
         </div>
       </div>
     </article>
@@ -451,7 +482,9 @@ function titleRow(block, fallback) {
 
 function transportCard(block) {
   const { card, body } = baseCard(block);
-  const firstSegment = (block.segments || [])[0] || {};
+  const segments = (block.segments || []).filter((segment) => segment && typeof segment === "object");
+  const firstSegment = segments[0] || {};
+  if (segments.length > 1) card.classList.add("multi-segment");
   body.innerHTML = titleRow(block, block.type === "flight_card" ? "航班方案" : "火车方案");
   const meta = compactTags([
     block.duration || firstSegment.duration,
@@ -460,15 +493,17 @@ function transportCard(block) {
     block.seat || firstSegment.seat,
   ]);
   if (meta) body.insertAdjacentHTML("beforeend", meta);
+  const overview = routeOverviewHtml(block, segments);
+  if (overview) body.insertAdjacentHTML("beforeend", overview);
 
   const timeline = document.createElement("div");
   timeline.className = "timeline";
-  for (const segment of block.segments || []) {
+  for (const segment of segments) {
     const depMain = segment.depCity || segment.depStation || "";
     const depSub = segment.depCity ? segment.depStation : "";
     const arrMain = segment.arrCity || segment.arrStation || "";
     const arrSub = segment.arrCity ? segment.arrStation : "";
-    const transportNo = compactText([segment.carrier, segment.number, segment.seat, segment.price]);
+    const transportNo = compactText([segment.carrier, segment.number, segment.seat]);
     timeline.insertAdjacentHTML(
       "beforeend",
       `
@@ -483,6 +518,7 @@ function transportCard(block) {
           <div class="route-line"></div>
           <span class="small">${escapeHtml(segment.duration || "")}</span>
           ${transportNo ? `<span class="small transport-no">${escapeHtml(transportNo)}</span>` : ""}
+          ${segment.price ? `<span class="segment-price">${escapeHtml(segment.price)}</span>` : ""}
         </div>
         <div class="station">
           <strong>${escapeHtml(arrMain)}</strong>
@@ -493,7 +529,11 @@ function transportCard(block) {
       `
     );
   }
+  if (!segments.length) {
+    timeline.innerHTML = `<p class="small">本次结果没有返回可结构化展示的班次明细。</p>`;
+  }
   body.appendChild(timeline);
+  appendItems(body, block.items);
   appendBooking(body, block.bookingUrl);
   return card;
 }
@@ -556,7 +596,8 @@ function bookingCard(block) {
 }
 
 function noticeCard(block) {
-  const { card, body } = baseCard(block, `notice ${block.severity === "error" ? "error" : ""}`);
+  const severityClass = block.severity === "error" ? "error" : block.severity === "warning" ? "warning" : "";
+  const { card, body } = baseCard(block, `notice ${severityClass}`);
   body.innerHTML = titleRow(block, "提示");
   appendItems(body, block.items);
   return card;
@@ -567,11 +608,13 @@ function appendItems(container, items = []) {
   const list = document.createElement("ul");
   list.className = "guide-list";
   for (const item of items) {
+    const text = cleanGuideItem(item);
+    if (!text) continue;
     const li = document.createElement("li");
-    li.textContent = typeof item === "string" ? item : JSON.stringify(item);
+    li.textContent = text;
     list.appendChild(li);
   }
-  container.appendChild(list);
+  if (list.children.length) container.appendChild(list);
 }
 
 function appendBooking(container, url) {
@@ -587,19 +630,23 @@ function appendBooking(container, url) {
 
 function renderPromptChips() {
   promptChips.innerHTML = "";
-  promptTemplates.forEach((template) => {
+  promptTemplates.forEach((template, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "prompt-chip";
     button.innerHTML = `<strong>${escapeHtml(template.label)}</strong><span>${escapeHtml(template.hint)}</span>`;
     button.title = template.query;
-    button.addEventListener("click", () => {
-      queryInput.value = template.query;
-      updateQueryCount();
-      queryInput.focus();
-    });
+    button.addEventListener("click", () => fillPromptTemplate(index));
     promptChips.appendChild(button);
   });
+}
+
+function fillPromptTemplate(index) {
+  const template = promptTemplates[index] || promptTemplates[0];
+  queryInput.value = template.query;
+  updateQueryCount();
+  queryInput.focus();
+  queryInput.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function updateQueryCount() {
@@ -616,6 +663,52 @@ function compactTags(values) {
 
 function compactText(values) {
   return values.filter(Boolean).join(" · ");
+}
+
+function routeOverviewHtml(block, segments) {
+  if (!segments.length) return "";
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  const origin = endpointLabel(first, "dep");
+  const firstDestination = endpointLabel(first, "arr");
+  const finalDestination = endpointLabel(last, "arr");
+  const routeText = origin && firstDestination && segments.length > 1 && sameText(origin, finalDestination)
+    ? `${origin} 往返 ${firstDestination}`
+    : compactText([origin, finalDestination]).replace(" · ", " 到 ");
+  if (!routeText) return "";
+  const facts = [
+    segments.length > 1 ? `${segments.length} 段` : "单程",
+    block.price ? `总价 ${block.price}` : "",
+    block.duration || "",
+  ].filter(Boolean);
+  return `
+    <div class="route-overview">
+      <strong>${escapeHtml(routeText)}</strong>
+      ${facts.length ? `<span>${facts.map(escapeHtml).join(" · ")}</span>` : ""}
+    </div>
+  `;
+}
+
+function endpointLabel(segment, side) {
+  const city = segment[`${side}City`];
+  const station = segment[`${side}Station`];
+  return city || station || "";
+}
+
+function sameText(left, right) {
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+function cleanGuideItem(item) {
+  let text = typeof item === "string" ? item : JSON.stringify(item);
+  text = text.trim().replace(/^[-*]\s*/, "");
+  if (!text) return "";
+  if (/^```/.test(text)) return "";
+  if (/^\|?\s*:?-{2,}/.test(text)) return "";
+  if (/^\|?\s*(航段|日期|航班号|航班|出发|到达|价格|票价|时长)\s*\|/.test(text)) return "";
+  if (/^当前为体验模式/.test(text)) return "";
+  return text.replace(/<[^>]+>/g, "").trim();
 }
 
 function tableCell(row, column, index) {

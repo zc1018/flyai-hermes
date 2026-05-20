@@ -3,8 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>旅行查询助手</title>
-    <link rel="stylesheet" href="assets/styles.css?v=20260520-2" />
+    <title>FlyAI Travel 旅行查询助手</title>
+    <meta name="theme-color" content="#eaf5f8" />
+    <link rel="stylesheet" href="assets/styles.css?v=20260520-3" />
   </head>
   <body>
     <main class="shell">
@@ -12,12 +13,12 @@
         <div class="brand-block">
           <p class="eyebrow">FlyAI Travel</p>
           <h1>旅行查询助手</h1>
-          <p class="topline">把想去的地方、时间和偏好说出来，实时交通、酒店和行程建议会被整理成清楚的旅行卡片。</p>
+          <p class="topline">像对旅行顾问说话一样描述目的地、时间和偏好，实时结果会被整理成清楚的交通、住宿和行程卡片。</p>
           <div class="top-quickfacts" aria-label="查询类型">
-            <span>机票</span>
+            <span>往返航班</span>
             <span>酒店</span>
             <span>目的地</span>
-            <span>行程</span>
+            <span>每日安排</span>
           </div>
         </div>
         <div class="top-actions">
@@ -73,22 +74,35 @@
               <span class="quota-pill" id="quotaStatus"></span>
             </div>
             <div class="prompt-chips" id="promptChips" aria-label="快捷查询"></div>
-            <div class="input-guide" aria-label="建议包含的信息">
-              <span>城市</span>
-              <span>日期</span>
-              <span>人数</span>
-              <span>预算</span>
-              <span>偏好</span>
+            <div class="travel-brief" id="travelBrief" aria-label="旅行需求清单">
+              <div class="brief-card">
+                <strong>去哪儿</strong>
+                <span>出发地、目的地、是否往返</span>
+              </div>
+              <div class="brief-card">
+                <strong>什么时候</strong>
+                <span>去程、返程、住几晚</span>
+              </div>
+              <div class="brief-card">
+                <strong>看重什么</strong>
+                <span>直飞、预算、时间、酒店位置</span>
+              </div>
+              <div class="brief-card">
+                <strong>必须给出</strong>
+                <span>价格、班次号、酒店名、理由</span>
+              </div>
             </div>
             <textarea
               id="queryInput"
               maxlength="2000"
+              aria-describedby="queryHint travelBrief"
               placeholder="例如：2026 年端午节前后，北京东京往返机票，停留 5 晚，上午北京出发，下午或晚上东京返回，不转机，给我最低价方案，要航班号和价格。"
             ></textarea>
             <div class="query-actions">
               <span id="queryHint">会查询实时旅行信息，并整理成可读卡片</span>
               <span id="queryCount" class="small">0/2000</span>
               <button class="ghost-button" type="button" id="clearQueryButton">清空</button>
+              <button class="ghost-button cancel-button is-hidden" type="button" id="cancelQueryButton">停止等待</button>
               <button type="submit" id="queryButton">查询</button>
             </div>
           </form>
@@ -99,14 +113,14 @@
               <div class="empty-map" aria-hidden="true">
                 <span></span><span></span><span></span>
               </div>
-              <div>
+              <div class="empty-content">
                 <p class="section-label">准备查询</p>
                 <h2>先从一个真实问题开始</h2>
-                <p>比如最低价往返机票、某个区域的酒店、适合假期的目的地，或者每天怎么安排。往返机票请把去程和返程条件都写清楚。</p>
-                <div class="guide-steps" aria-label="查询建议">
-                  <span>1. 说清目的地</span>
-                  <span>2. 写明时间</span>
-                  <span>3. 加上偏好</span>
+                <p>把城市、日期、人数、预算和偏好放进一句话里。往返机票请同时写清去程和返程，结果会更完整。</p>
+                <div class="empty-actions" aria-label="示例查询">
+                  <button type="button" data-template-index="0">查往返机票</button>
+                  <button type="button" data-template-index="1">找假期目的地</button>
+                  <button type="button" data-template-index="2">筛酒店</button>
                 </div>
               </div>
             </article>
@@ -115,6 +129,6 @@
       </section>
     </main>
 
-    <script src="assets/app.js?v=20260520-2"></script>
+    <script src="assets/app.js?v=20260520-3"></script>
   </body>
 </html>
