@@ -678,9 +678,9 @@ async def _await_xhs_blocks(task: asyncio.Task[XhsSearchResult]) -> List[Dict[st
 
 
 def _xhs_blocks_from_result(result: XhsSearchResult) -> List[Dict[str, Any]]:
-    if result.status == "disabled":
+    if result.status != "ok":
         return []
-    return result.blocks or []
+    return [block for block in result.blocks or [] if block.get("type") == "xhs_post_card"]
 
 
 def _store_result(

@@ -110,6 +110,23 @@ class FakeXhsClient:
         return {"enabled": True}
 
 
+class FakeTimeoutXhsClient(FakeXhsClient):
+    def search(self, user_query, user):
+        from app.xhs import XhsSearchResult
+
+        return XhsSearchResult(
+            status="timeout",
+            keyword="杭州 旅行攻略 避坑",
+            blocks=[
+                {
+                    "type": "notice",
+                    "title": "小红书灵感超时",
+                    "items": ["小红书补充查询超过时间上限，主查询结果已先展示。"],
+                }
+            ],
+        )
+
+
 def _reset_app(tmp_path, monkeypatch):
     test_db = tmp_path / "travel.db"
     store.database_path = Path(test_db)
@@ -214,6 +231,21 @@ def test_stream_can_append_xhs_supplement_and_preserve_history(tmp_path, monkeyp
 
     history = client.get("/api/history").json()
     assert any(block["type"] == "xhs_post_card" for block in history[0]["blocks"])
+
+
+def test_stream_suppresses_failed_xhs_supplement_noise(tmp_path, monkeypatch):
+    client = _reset_app(tmp_path, monkeypatch)
+    monkeypatch.setattr("app.main.xhs_client", FakeTimeoutXhsClient())
+    assert client.post("/api/login", json={"password": "secret"}).status_code == 200
+
+    stream = client.post("/api/query/stream", json={"query": "杭州西湖门票，顺便看看攻略"})
+
+    assert stream.status_code == 200
+    assert "event: result" in stream.text
+    assert "event: supplement" not in stream.text
+    assert "小红书灵感超时" not in stream.text
+    history = client.get("/api/history").json()
+    assert all(block["type"] != "xhs_post_card" for block in history[0]["blocks"])
 
 
 def test_conversation_clarifies_confirms_and_runs_search(tmp_path, monkeypatch):
