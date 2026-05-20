@@ -438,11 +438,42 @@ def _parse_json(raw_output: str) -> Optional[Any]:
     candidates = _json_candidates(text)
 
     for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
+        for variant in _json_parse_variants(candidate):
+            try:
+                return json.loads(variant)
+            except json.JSONDecodeError:
+                continue
     return None
+
+
+def _json_parse_variants(candidate: str) -> List[str]:
+    variants = [candidate]
+    repaired = _repair_json_string_line_breaks(candidate)
+    if repaired != candidate:
+        variants.append(repaired)
+    return variants
+
+
+def _repair_json_string_line_breaks(candidate: str) -> str:
+    repaired: List[str] = []
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if in_string and char in {"\n", "\r", "\t"}:
+            if repaired and repaired[-1] != " ":
+                repaired.append(" ")
+            escaped = False
+            continue
+        repaired.append(char)
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+    return "".join(repaired)
 
 
 def _json_candidates(text: str) -> List[str]:

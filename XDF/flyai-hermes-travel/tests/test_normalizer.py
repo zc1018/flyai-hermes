@@ -79,6 +79,39 @@ def test_normalizes_common_json_card_aliases_from_hermes():
     assert blocks[1]["segments"][1]["price"] == "¥1918"
 
 
+def test_recovers_wrapped_json_blocks_from_hermes_answer():
+    raw = """
+╭─ ⚕ Hermes ───────────────────────────────────────────────────────────────────╮
+{"summary":"2026年端午节（5月31日）前后，北京-东京直飞往返、停留5晚、
+上午北京出发且下午/晚上东京返回的最低票价组合为：去程5月30日（周六）春
+秋日本航空IJ018（10:45首都T3→15:30成田T3）票价1116元，返程6月4日（周四
+）南航CZ648（15:45羽田T3→18:45大兴）票价2148元，往返含税合计约3264元。
+","blocks":[{"type":"flightcard","title":"北京⇄东京
+端午节往返最低票价组合","price":"3264","number":"IJ018 /
+CZ648","segments":[{"label":"去程","depCity":"北京","depStation":"首都
+国际机场T3","depTime":"2026-05-30
+10:45","arrCity":"东京","arrStation":"成田T3","arrTime":"15:30","carrier":"春秋日本航空","number":"IJ018","price":"1116元"},{"label":"返程","depCity":"东京","depStation":"羽田T3","depTime":"2026-06-04
+15:45","arrCity":"北京","arrStation":"大兴","arrTime":"18:45","carrier":"南航","number":"CZ648","price":"2148元"}]}]}
+╰──────────────────────────────────────────────────────────────────────────────╯
+"""
+
+    blocks = normalize_output(raw, "北京东京往返机票，停留 5 晚")
+
+    titles = [block.get("title") for block in blocks]
+    assert "结果可能不完整" not in titles
+    assert blocks[0]["type"] == "notice"
+    assert blocks[1]["type"] == "flight_card"
+    assert blocks[1]["price"] == "¥3,264"
+    assert blocks[1]["number"] == "IJ018 / CZ648"
+    assert len(blocks[1]["segments"]) == 2
+    assert blocks[1]["segments"][0]["label"] == "去程"
+    assert blocks[1]["segments"][0]["depTime"] == "2026-05-30 10:45"
+    assert blocks[1]["segments"][0]["price"] == "¥1116"
+    assert blocks[1]["segments"][1]["label"] == "返程"
+    assert blocks[1]["segments"][1]["depTime"] == "2026-06-04 15:45"
+    assert blocks[1]["segments"][1]["price"] == "¥2148"
+
+
 def test_converts_hotel_item_list():
     raw = """
     {
